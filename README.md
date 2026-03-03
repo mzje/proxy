@@ -6,16 +6,19 @@
 An open-source LLM proxy that sits between your AI agents and providers. Tracks every request, shows where the money goes, and offers configurable task-aware routing — all running **locally, for free**.
 
 **Free, open-source proxy features:**
-- 📊 Per-request cost tracking across 11+ providers
+- 📊 Per-request cost tracking across 11 providers
 - 💰 **Cache-aware cost tracking** — accurately tracks Anthropic prompt caching with cache read savings, creation costs, and true per-request costs
 - 🔀 Configurable task-aware routing (complexity-based, cascade, model overrides)
 - 🛡️ Circuit breaker — if the proxy fails, your agent doesn't notice
-- 📈 **Local dashboard** at `localhost:4100` — cost breakdown, savings analysis, provider health
+- 📈 **Local dashboard** at `localhost:4100` — cost breakdown, savings analysis, provider health, agent breakdown
 - 💵 **Budget enforcement** — daily/hourly/per-request spend limits with block, warn, downgrade, or alert actions
 - 🔍 **Anomaly detection** — catches runaway agent loops, cost spikes, and token explosions in real time
 - 🔔 **Cost alerts** — threshold alerts at configurable percentages, webhook delivery, alert history
 - ⬇️ **Auto-downgrade** — automatically switches to cheaper models when budget thresholds are hit
 - 📦 **Aggressive cache** — exact-match response caching with gzipped disk persistence
+- 🤖 **Per-agent cost tracking** — identifies agents by system prompt fingerprint and tracks cost per agent
+- 📝 **Content logging** — dashboard shows system prompt preview, user message, and response preview per request
+- 🔐 **OAuth passthrough** — correctly forwards `user-agent` and `x-app` headers for Claude Max subscription users (OpenClaw compatible)
 - 🧠 **Osmosis mesh** — opt-in collective learning layer that shares anonymized routing signals across users (free, opt-in)
 - 🔧 **systemd/launchd service** — `relayplane service install` for always-on operation with auto-restart
 - 🏥 **Health watchdog** — `/health` endpoint with uptime tracking and active probing
@@ -32,7 +35,7 @@ relayplane start
 # Dashboard at http://localhost:4100
 ```
 
-Works with any agent framework that talks to OpenAI or Anthropic APIs. Point your client at `http://localhost:4801` (set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`) and the proxy handles the rest.
+Works with any agent framework that talks to OpenAI or Anthropic APIs. Point your client at `http://localhost:4100` (set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`) and the proxy handles the rest.
 
 ## Supported Providers
 
@@ -102,7 +105,7 @@ Provider APIs (Anthropic/OpenAI/Gemini/xAI/...)
 
 ## How It Works
 
-RelayPlane is a local HTTP proxy. You point your agent at `localhost:4801` by setting `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`. The proxy:
+RelayPlane is a local HTTP proxy. You point your agent at `localhost:4100` by setting `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`. The proxy:
 
 1. **Intercepts** your LLM API requests
 2. **Classifies** the task using heuristics (token count, prompt patterns, keyword matching — no LLM calls)
@@ -190,14 +193,14 @@ The cascade walks through the `models` array in order, starting from the first. 
 
 Use semantic model names instead of provider-specific IDs:
 
-| Alias | Resolves to |
-|-------|------------|
-| `rp:best` | `anthropic/claude-sonnet-4-20250514` |
-| `rp:fast` | `anthropic/claude-3-5-haiku-20241022` |
-| `rp:cheap` | `openai/gpt-4o-mini` |
-| `rp:balanced` | `anthropic/claude-3-5-haiku-20241022` |
-| `relayplane:auto` | Same as `rp:balanced` |
-| `rp:auto` | Same as `rp:balanced` |
+| Alias | Resolves to | Via |
+|-------|------------|-----|
+| `rp:best` | `anthropic/claude-sonnet-4-5` | OpenRouter |
+| `rp:fast` | `anthropic/claude-3-5-haiku` | OpenRouter |
+| `rp:cheap` | `google/gemini-2.0-flash-001` | OpenRouter |
+| `rp:balanced` | `anthropic/claude-3-5-haiku` | OpenRouter |
+| `relayplane:auto` | Same as `rp:balanced` | — |
+| `rp:auto` | Same as `rp:balanced` | — |
 
 Use these as the `model` field in your API requests:
 
@@ -328,10 +331,36 @@ Disables all network calls except the actual LLM requests. No telemetry transmis
 The built-in dashboard runs at [http://localhost:4100](http://localhost:4100) (or `/dashboard`). It shows:
 
 - Total requests, success rate, average latency
-- Cost breakdown by model and provider
-- Recent request history with routing decisions
-- Savings from routing optimizations
+- Cost breakdown by model and provider (with provider column to distinguish `anthropic` vs `openrouter` for same model names)
+- **Agent Cost Breakdown** — per-agent spend table identifying agents by system prompt fingerprint
+- Recent request history with agent column and expandable rows (state persists across the 5-second auto-refresh)
+- **Content previews** — system prompt preview, user message, and response preview in expandable rows
+- **Honest savings breakdown** — routing savings (RelayPlane's contribution) vs cache savings (Anthropic's feature), with tooltip explaining the calculation
+- Error detail capture — failed requests show the error message and HTTP status code
 - Provider health status
+- Wider 1600px layout for dense data views
+
+### Per-Agent Cost Tracking
+
+RelayPlane v1.7 identifies each agent by fingerprinting its system prompt. This groups all requests from the same agent together — even across sessions — so you can see exactly which agent is responsible for which costs.
+
+The Agent Cost Breakdown table in the dashboard shows total spend, request count, and average cost per request for each distinct agent. No configuration required — fingerprinting happens automatically.
+
+### Content Logging
+
+When content logging is enabled, the dashboard stores and displays:
+
+- A preview of the system prompt
+- The first user message in the conversation
+- A preview of the model's response
+
+This makes it easy to correlate a cost spike with the actual request that caused it. Content is stored locally only — nothing is sent to RelayPlane servers.
+
+### OAuth Passthrough (Claude Max / OpenClaw Users)
+
+If you use a Claude Max subscription via OAuth (e.g., through OpenClaw's browser relay), RelayPlane now correctly forwards the `user-agent` and `x-app` headers required by Anthropic's OAuth endpoint. Without this fix, Max subscription tokens would fail authentication when proxied.
+
+No configuration needed — the proxy detects OAuth-style requests and preserves the necessary headers automatically.
 
 ### API Endpoints
 

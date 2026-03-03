@@ -233,6 +233,8 @@ function sendCloudTelemetry(
 ): void {
   try {
     const cost = costUsd ?? estimateCost(model, tokensIn, tokensOut, cacheCreationTokens, cacheReadTokens);
+    // Baseline = what the same tokens would cost on Opus 4 with NO cache discount
+    const baselineCost = estimateCost('claude-opus-4-6', tokensIn, tokensOut);
     const event = {
       task_type: taskType,
       model,
@@ -241,6 +243,8 @@ function sendCloudTelemetry(
       latency_ms: Math.round(latencyMs),
       success,
       cost_usd: cost,
+      actual_cost_usd: cost,
+      baseline_cost_usd: baselineCost,
       requested_model: requestedModel,
       cache_creation_tokens: cacheCreationTokens,
       cache_read_tokens: cacheReadTokens,
@@ -2613,6 +2617,7 @@ th{text-align:left;color:#64748b;font-weight:500;padding:8px 12px;border-bottom:
 td{padding:8px 12px;border-bottom:1px solid #111318}
 .section{margin-bottom:32px}.section h2{font-size:1rem;font-weight:600;margin-bottom:12px;color:#94a3b8}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}.dot.up{background:#34d399}.dot.warn{background:#fbbf24}.dot.down{background:#ef4444}
+.section.collapsible h2{cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px}.section.collapsible h2::after{content:'▾';font-size:.8rem;color:#475569;transition:transform .2s}.section.collapsed h2::after{transform:rotate(-90deg)}.section.collapsed>*:not(h2){display:none}
 .badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:.75rem;font-weight:500}
 .badge.ok{background:#052e1633;color:#34d399}.badge.err{background:#2d0a0a;color:#ef4444}.badge.err-auth{background:#2d0a0a;color:#ef4444}.badge.err-rate{background:#2d2a0a;color:#fbbf24}.badge.err-timeout{background:#2d1a0a;color:#fb923c}
 .badge.tt-code{background:#1e3a5f;color:#60a5fa}.badge.tt-analysis{background:#3b1f6e;color:#a78bfa}.badge.tt-summarization{background:#1a3a2a;color:#6ee7b7}.badge.tt-qa{background:#3a2f1e;color:#fbbf24}.badge.tt-general{background:#1e293b;color:#94a3b8}
@@ -2627,20 +2632,21 @@ td{padding:8px 12px;border-bottom:1px solid #111318}
 </style></head><body>
 <div class="header"><div><h1>⚡ RelayPlane Dashboard</h1></div><div class="meta"><a href="/dashboard/config">Config</a> · <span id="ver"></span><span id="vstat" class="vstat unavailable">Unable to check</span> · up <span id="uptime"></span> · refreshes every 5s</div></div>
 <div class="cards">
-  <div class="card"><div class="label">Total Requests</div><div class="value" id="totalReq">—</div></div>
+  <div class="card"><div class="label">Requests (7d window, max 10k)</div><div class="value" id="totalReq">—</div><div id="totalReqDetail" style="font-size:.75rem;color:#64748b;margin-top:4px">—</div></div>
   <div class="card"><div class="label">Total Cost</div><div class="value" id="totalCost">—</div></div>
   <div class="card"><div class="label">Routing Savings <span class="tooltip-wrap"><span class="info-icon">ⓘ</span><span class="tooltip-box" id="savings-tooltip">Loading...</span></span></div><div class="value green" id="savings">—</div><div id="savings-detail" style="font-size:.75rem;color:#64748b;margin-top:4px">—</div></div>
-  <div class="card"><div class="label">Avg Latency</div><div class="value" id="avgLat">—</div></div>
+  <div class="card"><div class="label">Avg Latency</div><div class="value" id="avgLat">—</div><div id="avgLatDetail" style="font-size:.75rem;color:#64748b;margin-top:4px">—</div></div>
 </div>
-<div class="section"><h2>Model Breakdown</h2>
-<table><thead><tr><th>Provider</th><th>Model</th><th>Requests</th><th>Cost</th><th>% of Total</th></tr></thead><tbody id="models"></tbody></table></div>
-<div class="section"><h2>Agent Cost Breakdown</h2>
+<div class="section collapsible collapsed"><h2>Model Breakdown <span style="font-size:.75rem;color:#64748b;font-weight:400">(7d window, history-capped)</span></h2>
+<table><thead><tr><th>Provider</th><th>Model</th><th>Requests</th><th>Cost</th><th>% of 7d Window</th></tr></thead><tbody id="models"></tbody></table></div>
+<div class="section collapsible collapsed"><h2>Agent Cost Breakdown</h2>
 <table><thead><tr><th>Agent</th><th>Requests</th><th>Total Cost</th><th>Last Active</th><th></th></tr></thead><tbody id="agents"></tbody></table></div>
 <div class="section"><h2>Provider Status</h2><div class="prov" id="providers"></div></div>
-<div class="section"><h2>Recent Runs</h2>
+<div class="section"><h2>Recent Runs <span id="historyLabel" style="font-size:.75rem;color:#64748b;font-weight:400">(7d window, history-capped)</span></h2>
 <table><thead><tr><th>Time</th><th>Agent</th><th>Model</th><th class="col-tt">Task Type</th><th class="col-cx">Complexity</th><th>Tokens In</th><th>Tokens Out</th><th class="col-cache">Cache Create</th><th class="col-cache">Cache Read</th><th>Cost</th><th>Latency</th><th>Status</th></tr></thead><tbody id="runs"></tbody></table></div>
 <script>
 const $ = id => document.getElementById(id);
+document.querySelectorAll('.section.collapsible h2').forEach(h2=>h2.addEventListener('click',()=>h2.parentElement.classList.toggle('collapsed')));
 function fmt(n,d=2){return typeof n==='number'?n.toFixed(d):'-'}
 function fmtTime(s){const d=new Date(s);return d.toLocaleTimeString()}
 function dur(s){const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?h+'h '+m+'m':m+'m'}
@@ -2669,8 +2675,13 @@ async function load(){
         vEl.textContent = 'Unable to check · v' + versionStatus.current;
       }
     }
-    const total=stats.summary?.totalEvents||0;
-    $('totalReq').textContent=total;
+    const lifetimeTotal=stats.summary?.totalRequests ?? stats.summary?.totalEvents ?? 0;
+    const historyTotal=stats.summary?.totalEvents ?? 0;
+    const historyLimit=stats.summary?.historyLimit ?? 10000;
+    const retentionDays=stats.summary?.retentionDays ?? 7;
+    $('totalReq').textContent=historyTotal;
+    $('totalReqDetail').textContent='Process lifetime: '+lifetimeTotal.toLocaleString()+' (resets on restart)';
+    $('historyLabel').textContent='('+retentionDays+'d window, max '+historyLimit.toLocaleString()+' requests)';
     $('totalCost').textContent='$'+fmt(stats.summary?.totalCostUsd??0,4);
     const savAmt=sav.savedAmount??sav.savings??0;
     const cacheSav=sav.cacheSavings??0;
@@ -2702,8 +2713,9 @@ async function load(){
       tipEl.innerHTML=tip;
     }
     $('avgLat').textContent=(stats.summary?.avgLatencyMs??0)+'ms';
+    $('avgLatDetail').textContent='7d window metric (history-capped)';
     $('models').innerHTML=(stats.byModel||[]).map(m=>
-      '<tr><td style="color:#94a3b8;font-size:.85rem">'+(m.provider||'—')+'</td><td>'+m.model+'</td><td>'+m.count+'</td><td>$'+fmt(m.costUsd,4)+'</td><td>'+fmt(total>0?m.count/total*100:0,1)+'%</td></tr>'
+      '<tr><td style="color:#94a3b8;font-size:.85rem">'+(m.provider||'—')+'</td><td>'+m.model+'</td><td>'+m.count+'</td><td>$'+fmt(m.costUsd,4)+'</td><td>'+fmt(historyTotal>0?m.count/historyTotal*100:0,1)+'%</td></tr>'
     ).join('')||'<tr><td colspan=5 style="color:#64748b">No data yet</td></tr>';
     function ttCls(t){const m={code_generation:'tt-code',analysis:'tt-analysis',summarization:'tt-summarization',question_answering:'tt-qa'};return m[t]||'tt-general'}
     function cxCls(c){const m={simple:'cx-simple',moderate:'cx-moderate',complex:'cx-complex'};return m[c]||'cx-simple'}
@@ -3296,7 +3308,12 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
         const result = {
           summary: {
             totalCostUsd: totalCost,
+            // totalEvents is limited by requestHistory retention/MAX_HISTORY.
+            // totalRequests is process-lifetime and continues beyond 10k.
             totalEvents: recent.length,
+            totalRequests: globalStats.totalRequests,
+            historyLimit: MAX_HISTORY,
+            retentionDays: HISTORY_RETENTION_DAYS,
             avgLatencyMs: recent.length ? Math.round(totalLatency / recent.length) : 0,
             successRate: recent.length ? recent.filter(r => r.success).length / recent.length : 0,
           },
@@ -3388,7 +3405,10 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
 
           const date = r.timestamp.slice(0, 10);
           const day = byDayMap.get(date) || { savedAmount: 0, originalCost: 0, actualCost: 0 };
-          day.savedAmount += Math.max(0, totalCacheSavings + totalRoutingSavings);
+          // Baseline = what this request would cost on Opus with no cache
+          const opusNoCacheCost = estimateCost('claude-opus-4-6', r.tokensIn + (r.cacheCreationTokens||0) + (r.cacheReadTokens||0), r.tokensOut);
+          day.savedAmount += Math.max(0, opusNoCacheCost - actualCost);
+          day.originalCost += opusNoCacheCost;
           day.actualCost += actualCost;
           byDayMap.set(date, day);
         }
@@ -4196,6 +4216,10 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           undefined, undefined,
           catchErrMsg, catchErrStatus
         );
+        if (recordTelemetry) {
+          sendCloudTelemetry(taskType, targetModel || requestedModel, 0, 0, durationMs, false, 0, originalModel ?? undefined);
+          meshCapture(targetModel || requestedModel, targetProvider, taskType, 0, 0, 0, durationMs, false, catchErrMsg);
+        }
         if (err instanceof ProviderResponseError) {
           res.writeHead(err.status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(err.payload));
@@ -4729,6 +4753,10 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
             cascadeErrStatus = 500;
           }
           logRequest(originalRequestedModel ?? 'unknown', targetModel || 'unknown', targetProvider, durationMs, false, 'cascade', undefined, taskType, complexity, undefined, undefined, cascadeErrMsg, cascadeErrStatus);
+          if (recordTelemetry) {
+            sendCloudTelemetry(taskType, targetModel || 'unknown', 0, 0, durationMs, false, 0, originalRequestedModel ?? undefined);
+            meshCapture(targetModel || 'unknown', targetProvider, taskType, 0, 0, 0, durationMs, false, cascadeErrMsg);
+          }
           if (err instanceof ProviderResponseError) {
             res.writeHead(err.status, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(err.payload));
@@ -4965,6 +4993,10 @@ async function handleStreamingRequest(
       const durationMs = Date.now() - startTime;
       const streamErrMsg = extractProviderErrorMessage(errorData, providerResponse.status);
       logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, undefined, undefined, streamErrMsg, providerResponse.status);
+      if (recordTelemetry) {
+        sendCloudTelemetry(taskType, targetModel, 0, 0, durationMs, false, 0, request.model ?? undefined);
+        meshCapture(targetModel, targetProvider, taskType, 0, 0, 0, durationMs, false, streamErrMsg);
+      }
       res.writeHead(providerResponse.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(errorData));
       return;
@@ -4976,6 +5008,10 @@ async function handleStreamingRequest(
     }
     const durationMs = Date.now() - startTime;
     logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, undefined, undefined, errorMsg, 500);
+    if (recordTelemetry) {
+      sendCloudTelemetry(taskType, targetModel, 0, 0, durationMs, false, 0, request.model ?? undefined);
+      meshCapture(targetModel, targetProvider, taskType, 0, 0, 0, durationMs, false, errorMsg);
+    }
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `Provider error: ${errorMsg}` }));
     return;
@@ -5184,6 +5220,10 @@ async function handleNonStreamingRequest(
       const durationMs = Date.now() - startTime;
       const nsErrMsg = extractProviderErrorMessage(responseData, result.status);
       logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, undefined, undefined, nsErrMsg, result.status);
+      if (recordTelemetry) {
+        sendCloudTelemetry(taskType, targetModel, 0, 0, durationMs, false, 0, request.model ?? undefined);
+        meshCapture(targetModel, targetProvider, taskType, 0, 0, 0, durationMs, false, nsErrMsg);
+      }
       res.writeHead(result.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(responseData));
       return;
@@ -5195,6 +5235,10 @@ async function handleNonStreamingRequest(
     }
     const durationMs = Date.now() - startTime;
     logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, undefined, undefined, errorMsg, 500);
+    if (recordTelemetry) {
+      sendCloudTelemetry(taskType, targetModel, 0, 0, durationMs, false, 0, request.model ?? undefined);
+      meshCapture(targetModel, targetProvider, taskType, 0, 0, 0, durationMs, false, errorMsg);
+    }
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `Provider error: ${errorMsg}` }));
     return;

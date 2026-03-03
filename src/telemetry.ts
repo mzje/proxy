@@ -49,9 +49,15 @@ export interface TelemetryEvent {
   /** Whether request succeeded */
   success: boolean;
   
-  /** Estimated cost in USD */
+  /** Estimated cost in USD (actual cost paid on the routed model, for backward compatibility) */
   cost_usd: number;
-  
+
+  /** Actual cost paid on the routed model (same as cost_usd; explicit field for cloud savings split) */
+  actual_cost_usd?: number;
+
+  /** Baseline cost — what the same request would cost on Claude Opus 4 at full price (no cache discount) */
+  baseline_cost_usd?: number;
+
   /** Timestamp */
   timestamp: string;
 
