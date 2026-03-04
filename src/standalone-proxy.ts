@@ -203,17 +203,68 @@ export const RELAYPLANE_ALIASES: Record<string, string> = {
 
 /**
  * Smart routing aliases - map to specific provider/model combinations
- * These provide semantic shortcuts for common use cases
+ * These provide semantic shortcuts for common use cases.
+ * Populated dynamically at proxy startup based on available env vars.
+ * Use buildSmartAliases() to (re)generate.
  */
-export const SMART_ALIASES: Record<string, { provider: Provider; model: string }> = {
-  // Best quality model — via OpenRouter (no separate Anthropic key needed)
+export let SMART_ALIASES: Record<string, { provider: Provider; model: string }> = {
+  // Defaults: OpenRouter (used when no env vars are available)
   'rp:best': { provider: 'openrouter', model: 'anthropic/claude-sonnet-4-5' },
-  // Fast/cheap model for simple tasks
   'rp:fast': { provider: 'openrouter', model: 'anthropic/claude-3-5-haiku' },
   'rp:cheap': { provider: 'openrouter', model: 'google/gemini-2.0-flash-001' },
-  // Balanced model for general use
   'rp:balanced': { provider: 'openrouter', model: 'anthropic/claude-3-5-haiku' },
 };
+
+/**
+ * Build provider-aware smart aliases based on available env vars at startup.
+ * Priority: OPENROUTER_API_KEY > ANTHROPIC_API_KEY > OPENAI_API_KEY > fallback (OpenRouter defaults).
+ * Call this once at proxy startup.
+ */
+export function buildSmartAliases(): { aliases: Record<string, { provider: Provider; model: string }>; via: string } {
+  if (process.env['OPENROUTER_API_KEY']) {
+    return {
+      via: 'openrouter',
+      aliases: {
+        'rp:best': { provider: 'openrouter', model: 'anthropic/claude-sonnet-4-5' },
+        'rp:fast': { provider: 'openrouter', model: 'anthropic/claude-3-5-haiku' },
+        'rp:cheap': { provider: 'openrouter', model: 'google/gemini-2.0-flash-001' },
+        'rp:balanced': { provider: 'openrouter', model: 'anthropic/claude-3-5-haiku' },
+      },
+    };
+  }
+  if (process.env['ANTHROPIC_API_KEY']) {
+    return {
+      via: 'anthropic',
+      aliases: {
+        'rp:best': { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+        'rp:fast': { provider: 'anthropic', model: 'claude-3-5-haiku-latest' },
+        'rp:cheap': { provider: 'anthropic', model: 'claude-3-5-haiku-latest' },
+        'rp:balanced': { provider: 'anthropic', model: 'claude-3-5-haiku-latest' },
+      },
+    };
+  }
+  if (process.env['OPENAI_API_KEY']) {
+    return {
+      via: 'openai',
+      aliases: {
+        'rp:best': { provider: 'openai', model: 'gpt-4o' },
+        'rp:fast': { provider: 'openai', model: 'gpt-4o-mini' },
+        'rp:cheap': { provider: 'openai', model: 'gpt-4o-mini' },
+        'rp:balanced': { provider: 'openai', model: 'gpt-4o-mini' },
+      },
+    };
+  }
+  // Fallback: OpenRouter defaults (user will get auth error, but won't silently fail)
+  return {
+    via: 'openrouter (fallback — no API keys detected)',
+    aliases: {
+      'rp:best': { provider: 'openrouter', model: 'anthropic/claude-sonnet-4-5' },
+      'rp:fast': { provider: 'openrouter', model: 'anthropic/claude-3-5-haiku' },
+      'rp:cheap': { provider: 'openrouter', model: 'google/gemini-2.0-flash-001' },
+      'rp:balanced': { provider: 'openrouter', model: 'anthropic/claude-3-5-haiku' },
+    },
+  };
+}
 
 /**
  * Send a telemetry event to the cloud (anonymous or authenticated).
@@ -1129,16 +1180,23 @@ function getAuthForModel(
 function buildAnthropicHeadersWithAuth(
   ctx: RequestContext,
   apiKey?: string,
-  isMaxToken?: boolean
+  isMaxToken?: boolean,
+  isRerouted?: boolean
 ): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'anthropic-version': ctx.versionHeader || '2023-06-01',
   };
 
-  // Auth: ALWAYS prefer incoming auth for passthrough (don't replace it)
-  // Incoming auth is from Claude Code/OpenClaw and is already the right token for the request
-  if (ctx.authHeader) {
+  // Detect if incoming auth is OAuth (sk-ant-oat*)
+  const incomingIsOAuth = ctx.apiKeyHeader?.startsWith('sk-ant-oat') || ctx.authHeader?.includes('sk-ant-oat');
+  const apiKeyIsRegular = apiKey && apiKey.startsWith('sk-ant-api');
+
+  // When rerouted (auto mode changed the model) and incoming is OAuth,
+  // prefer the regular API key — OAuth doesn't work for all models (e.g. Haiku)
+  if (isRerouted && incomingIsOAuth && apiKeyIsRegular) {
+    headers['x-api-key'] = apiKey;
+  } else if (ctx.authHeader) {
     // Incoming Authorization header takes priority - use it as-is
     headers['Authorization'] = ctx.authHeader;
   } else if (ctx.apiKeyHeader) {
@@ -1276,9 +1334,10 @@ async function forwardNativeAnthropicRequest(
   body: Record<string, unknown>,
   ctx: RequestContext,
   envApiKey?: string,
-  isMaxToken?: boolean
+  isMaxToken?: boolean,
+  isRerouted?: boolean
 ): Promise<Response> {
-  const headers = buildAnthropicHeadersWithAuth(ctx, envApiKey, isMaxToken);
+  const headers = buildAnthropicHeadersWithAuth(ctx, envApiKey, isMaxToken, isRerouted);
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -2871,6 +2930,11 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
     if (verbose) console.log(`[relayplane] ${msg}`);
   };
 
+  // Resolve smart aliases based on available env vars
+  const { aliases: resolvedAliases, via: aliasVia } = buildSmartAliases();
+  SMART_ALIASES = resolvedAliases;
+  console.log(`[RelayPlane] Smart aliases resolved via: ${aliasVia}`);
+
   // Load persistent history from disk
   loadHistoryFromDisk();
   loadAgentRegistry();
@@ -2887,6 +2951,62 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
 
   const configPath = getProxyConfigPath();
   let proxyConfig = await loadProxyConfig(configPath, log);
+
+  // Auto-config on startup: detect available auth and set optimal routing
+  const configExists = await fs.promises.access(configPath).then(() => true).catch(() => false);
+  if (!configExists || proxyConfig.routing?.mode === 'auto') {
+    const envAnthropicKey = process.env['ANTHROPIC_API_KEY'];
+    const hasRegularApiKey = !!envAnthropicKey && envAnthropicKey.startsWith('sk-ant-api');
+
+    if (hasRegularApiKey) {
+      // Full 3-tier routing with API key
+      console.log('[RelayPlane] Auto-config: ANTHROPIC_API_KEY detected — enabling 3-tier routing (haiku/sonnet/opus)');
+      if (!configExists) {
+        const autoConfig: RelayPlaneProxyConfigFile = {
+          enabled: true,
+          modelOverrides: {},
+          routing: {
+            mode: 'auto',
+            cascade: { enabled: false, models: [], escalateOn: 'uncertainty', maxEscalations: 1 },
+            complexity: {
+              enabled: true,
+              simple: 'claude-haiku-4-5',
+              moderate: 'claude-sonnet-4-6',
+              complex: 'claude-opus-4-6',
+            },
+          },
+          reliability: proxyConfig.reliability,
+        };
+        await saveProxyConfig(configPath, autoConfig);
+        proxyConfig = await loadProxyConfig(configPath, log);
+        console.log(`[RelayPlane] Auto-config: wrote 3-tier routing config to ${configPath}`);
+      }
+    } else {
+      // No regular API key — OAuth only or no key, skip Haiku
+      if (!configExists) {
+        console.warn('[RelayPlane] ⚠️  No ANTHROPIC_API_KEY set — Haiku routing disabled (OAuth not supported). Set ANTHROPIC_API_KEY to enable 3-tier routing.');
+        const autoConfig: RelayPlaneProxyConfigFile = {
+          enabled: true,
+          modelOverrides: {},
+          routing: {
+            mode: 'auto',
+            cascade: { enabled: false, models: [], escalateOn: 'uncertainty', maxEscalations: 1 },
+            complexity: {
+              enabled: true,
+              simple: 'claude-sonnet-4-6',
+              moderate: 'claude-sonnet-4-6',
+              complex: 'claude-opus-4-6',
+            },
+          },
+          reliability: proxyConfig.reliability,
+        };
+        await saveProxyConfig(configPath, autoConfig);
+        proxyConfig = await loadProxyConfig(configPath, log);
+        console.log(`[RelayPlane] Auto-config: wrote OAuth-safe config to ${configPath} (no Haiku)`);
+      }
+    }
+  }
+
   _activeProxyConfig = proxyConfig;
   const cooldownManager = new CooldownManager(getCooldownConfig(proxyConfig));
 
@@ -3955,7 +4075,8 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
               if (modelAuth.isMax) {
                 log(`Using MAX token for ${resolved.model}`);
               }
-              const providerResponse = await forwardNativeAnthropicRequest(attemptBody, ctx, modelAuth.apiKey, modelAuth.isMax);
+              const isCascadeRerouted = resolved.model !== originalModel;
+              const providerResponse = await forwardNativeAnthropicRequest(attemptBody, ctx, modelAuth.apiKey, modelAuth.isMax, isCascadeRerouted);
               const responseData = (await providerResponse.json()) as Record<string, unknown>;
               if (!providerResponse.ok) {
                 if (proxyConfig.reliability?.cooldowns?.enabled) {
@@ -3986,11 +4107,17 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           if (modelAuth.isMax) {
             log(`Using MAX token for ${finalModel}`);
           }
+          // isRerouted: true when auto-routing changed the model from what the user requested
+          const isRerouted = routingMode !== 'passthrough' && finalModel !== originalModel;
+          if (isRerouted) {
+            log(`Rerouted: ${originalModel} → ${finalModel} (auth fallback enabled)`);
+          }
           const providerResponse = await forwardNativeAnthropicRequest(
             { ...requestBody, model: finalModel },
             ctx,
             modelAuth.apiKey,
-            modelAuth.isMax
+            modelAuth.isMax,
+            isRerouted
           );
           if (!providerResponse.ok) {
             const errorPayload = (await providerResponse.json()) as Record<string, unknown>;
