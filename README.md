@@ -3,28 +3,28 @@
 [![npm](https://img.shields.io/npm/v/@relayplane/proxy)](https://www.npmjs.com/package/@relayplane/proxy)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/RelayPlane/proxy/blob/main/LICENSE)
 
-An open-source LLM proxy that sits between your AI agents and providers. Tracks every request, shows where the money goes, and offers configurable task-aware routing — all running **locally, for free**.
+An open-source LLM proxy that sits between your AI agents and providers. Tracks every request, shows where the money goes, and offers configurable task-aware routing - all running **locally, for free**.
 
 **Free, open-source proxy features:**
 - 📊 Per-request cost tracking across 11 providers
-- 💰 **Cache-aware cost tracking** — accurately tracks Anthropic prompt caching with cache read savings, creation costs, and true per-request costs
+- 💰 **Cache-aware cost tracking** - accurately tracks Anthropic prompt caching with cache read savings, creation costs, and true per-request costs
 - 🔀 Configurable task-aware routing (complexity-based, cascade, model overrides)
-- 🛡️ Circuit breaker — if the proxy fails, your agent doesn't notice
-- 📈 **Local dashboard** at `localhost:4100` — cost breakdown, savings analysis, provider health, agent breakdown
-- 💵 **Budget enforcement** — daily/hourly/per-request spend limits with block, warn, downgrade, or alert actions
-- 🔍 **Anomaly detection** — catches runaway agent loops, cost spikes, and token explosions in real time
-- 🔔 **Cost alerts** — threshold alerts at configurable percentages, webhook delivery, alert history
-- ⬇️ **Auto-downgrade** — automatically switches to cheaper models when budget thresholds are hit
-- 📦 **Aggressive cache** — exact-match response caching with gzipped disk persistence
-- 🤖 **Per-agent cost tracking** — identifies agents by system prompt fingerprint and tracks cost per agent
-- 📝 **Content logging** — dashboard shows system prompt preview, user message, and response preview per request
-- 🔐 **OAuth passthrough** — correctly forwards `user-agent` and `x-app` headers for Claude Max subscription users (OpenClaw compatible)
-- 🧠 **Osmosis mesh** — collective learning layer that shares anonymized routing signals across users (on by default, opt-out: `relayplane mesh off`)
-- 🔧 **systemd/launchd service** — `relayplane service install` for always-on operation with auto-restart
-- 🏥 **Health watchdog** — `/health` endpoint with uptime tracking and active probing
-- 🛡️ **Config resilience** — atomic writes, automatic backup/restore, credential separation
+- 🛡️ Circuit breaker - if the proxy fails, your agent doesn't notice
+- 📈 **Local dashboard** at `localhost:4100` - cost breakdown, savings analysis, provider health, agent breakdown
+- 💵 **Budget enforcement** - daily/hourly/per-request spend limits with block, warn, downgrade, or alert actions
+- 🔍 **Anomaly detection** - catches runaway agent loops, cost spikes, and token explosions in real time
+- 🔔 **Cost alerts** - threshold alerts at configurable percentages, webhook delivery, alert history
+- ⬇️ **Auto-downgrade** - automatically switches to cheaper models when budget thresholds are hit
+- 📦 **Aggressive cache** - exact-match response caching with gzipped disk persistence
+- 🤖 **Per-agent cost tracking** - identifies agents by system prompt fingerprint and tracks cost per agent
+- 📝 **Content logging** - dashboard shows system prompt preview, user message, and response preview per request
+- 🔐 **OAuth passthrough** - correctly forwards `user-agent` and `x-app` headers for Claude Max subscription users (OpenClaw compatible)
+- 🧠 **Osmosis mesh** - collective learning layer that shares anonymized routing signals across users (on by default, opt-out: `relayplane mesh off`)
+- 🔧 **systemd/launchd service** - `relayplane service install` for always-on operation with auto-restart
+- 🏥 **Health watchdog** - `/health` endpoint with uptime tracking and active probing
+- 🛡️ **Config resilience** - atomic writes, automatic backup/restore, credential separation
 
-> **Cloud dashboard available separately** — see [Cloud Dashboard & Pro Features](#cloud-dashboard--pro-features) below. Your prompts always stay local.
+> **Cloud dashboard available separately** - see [Cloud Dashboard & Pro Features](#cloud-dashboard--pro-features) below. Your prompts always stay local.
 
 ## Quick Start
 
@@ -37,7 +37,7 @@ relayplane start
 
 Works with any agent framework that talks to OpenAI or Anthropic APIs. Point your client at `http://localhost:4100` (set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`) and the proxy handles the rest.
 
-## What's New in v1.9
+## What's New in v1.8.14+
 
 **Breaking changes for upgraders:**
 
@@ -77,7 +77,7 @@ A minimal config file:
 }
 ```
 
-All configuration is optional — sensible defaults are applied for every field. The proxy merges your config with its defaults via deep merge, so you only need to specify what you want to change.
+All configuration is optional - sensible defaults are applied for every field. The proxy merges your config with its defaults via deep merge, so you only need to specify what you want to change.
 
 ## Architecture
 
@@ -118,12 +118,12 @@ Provider APIs (Anthropic/OpenAI/Gemini/xAI/...)
 RelayPlane is a local HTTP proxy. You point your agent at `localhost:4100` by setting `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`. The proxy:
 
 1. **Intercepts** your LLM API requests
-2. **Classifies** the task using heuristics (token count, prompt patterns, keyword matching — no LLM calls)
+2. **Classifies** the task using heuristics (token count, prompt patterns, keyword matching - no LLM calls)
 3. **Routes** to the configured model based on classification and your routing rules (or passes through to the original model by default)
 4. **Forwards** the request directly to the LLM provider (your prompts go straight to the provider, not through RelayPlane servers)
 5. **Records** token counts, latency, and cost locally for your dashboard
 
-**Default behavior is passthrough** — requests go to whatever model your agent requested. Routing (cascade, complexity-based) is configurable and must be explicitly enabled.
+**Default behavior is passthrough** - requests go to whatever model your agent requested. Routing (cascade, complexity-based) is configurable and must be explicitly enabled.
 
 ## Complexity-Based Routing
 
@@ -144,11 +144,11 @@ The proxy classifies incoming requests by complexity (simple, moderate, complex)
 
 **How classification works:**
 
-- **Simple** — Short prompts, straightforward Q&A, basic code tasks
-- **Moderate** — Multi-step reasoning, code review, analysis with context
-- **Complex** — Architecture decisions, large codebases, tasks with many tools, long prompts with evaluation/comparison language
+- **Simple** - Short prompts, straightforward Q&A, basic code tasks
+- **Moderate** - Multi-step reasoning, code review, analysis with context
+- **Complex** - Architecture decisions, large codebases, tasks with many tools, long prompts with evaluation/comparison language
 
-The classifier scores requests based on message count, total token length, tool usage, and content patterns (e.g., words like "analyze", "compare", "evaluate" increase the score). This happens locally — no prompt content is sent anywhere.
+The classifier scores requests based on message count, total token length, tool usage, and content patterns (e.g., words like "analyze", "compare", "evaluate" increase the score). This happens locally - no prompt content is sent anywhere.
 
 ## Model Overrides
 
@@ -209,8 +209,8 @@ Use semantic model names instead of provider-specific IDs:
 | `rp:fast` | `anthropic/claude-3-5-haiku` | OpenRouter |
 | `rp:cheap` | `google/gemini-2.0-flash-001` | OpenRouter |
 | `rp:balanced` | `anthropic/claude-3-5-haiku` | OpenRouter |
-| `relayplane:auto` | Same as `rp:balanced` | — |
-| `rp:auto` | Same as `rp:balanced` | — |
+| `relayplane:auto` | Same as `rp:balanced` | - |
+| `rp:auto` | Same as `rp:balanced` | - |
 
 Use these as the `model` field in your API requests:
 
@@ -238,7 +238,7 @@ Append `:cost`, `:fast`, or `:quality` to any model name to hint at routing pref
 | `:fast` | Optimize for lowest latency |
 | `:quality` | Optimize for best output quality |
 
-The suffix is stripped before provider lookup — the base model must still be valid. Suffixes influence routing decisions when the proxy has multiple options.
+The suffix is stripped before provider lookup - the base model must still be valid. Suffixes influence routing decisions when the proxy has multiple options.
 
 ## Provider Cooldowns / Reliability
 
@@ -303,12 +303,12 @@ relayplane telemetry off
 
 The proxy sends anonymized metadata to `api.relayplane.com`:
 
-- **device_id** — Random anonymous hash (no PII)
-- **task_type** — Heuristic classification label (e.g., "code_generation", "summarization")
-- **model** — Which model was used
-- **tokens_in/out** — Token counts
-- **latency_ms** — Response time
-- **cost_usd** — Estimated cost
+- **device_id** - Random anonymous hash (no PII)
+- **task_type** - Heuristic classification label (e.g., "code_generation", "summarization")
+- **model** - Which model was used
+- **tokens_in/out** - Token counts
+- **latency_ms** - Response time
+- **cost_usd** - Estimated cost
 
 **Never collected:** prompts, responses, file paths, or anything that could identify you or your project. Your prompts go directly to LLM providers, never through RelayPlane servers. Mesh (on by default) shares anonymized metadata: model, tokens, cost, latency, success/fail. Opt out: `relayplane mesh off`.
 
@@ -316,7 +316,7 @@ The proxy sends anonymized metadata to `api.relayplane.com`:
 
 When the proxy connects and telemetry is enabled, it will confirm:
 ```
-[RelayPlane] Cloud dashboard connected — telemetry enabled.
+[RelayPlane] Cloud dashboard connected - telemetry enabled.
 Your prompts stay local. Only anonymous metadata (model, tokens, cost) is sent.
 Disable anytime: relayplane telemetry off
 ```
@@ -343,19 +343,19 @@ The built-in dashboard runs at [http://localhost:4100](http://localhost:4100) (o
 
 - Total requests, success rate, average latency
 - Cost breakdown by model and provider (with provider column to distinguish `anthropic` vs `openrouter` for same model names)
-- **Agent Cost Breakdown** — per-agent spend table identifying agents by system prompt fingerprint
+- **Agent Cost Breakdown** - per-agent spend table identifying agents by system prompt fingerprint
 - Recent request history with agent column and expandable rows (state persists across the 5-second auto-refresh)
-- **Content previews** — system prompt preview, user message, and response preview in expandable rows
-- **Honest savings breakdown** — routing savings (RelayPlane's contribution) vs cache savings (Anthropic's feature), with tooltip explaining the calculation
-- Error detail capture — failed requests show the error message and HTTP status code
+- **Content previews** - system prompt preview, user message, and response preview in expandable rows
+- **Honest savings breakdown** - routing savings (RelayPlane's contribution) vs cache savings (Anthropic's feature), with tooltip explaining the calculation
+- Error detail capture - failed requests show the error message and HTTP status code
 - Provider health status
 - Wider 1600px layout for dense data views
 
 ### Per-Agent Cost Tracking
 
-RelayPlane v1.7 identifies each agent by fingerprinting its system prompt. This groups all requests from the same agent together — even across sessions — so you can see exactly which agent is responsible for which costs.
+RelayPlane v1.7 identifies each agent by fingerprinting its system prompt. This groups all requests from the same agent together - even across sessions - so you can see exactly which agent is responsible for which costs.
 
-The Agent Cost Breakdown table in the dashboard shows total spend, request count, and average cost per request for each distinct agent. No configuration required — fingerprinting happens automatically.
+The Agent Cost Breakdown table in the dashboard shows total spend, request count, and average cost per request for each distinct agent. No configuration required - fingerprinting happens automatically.
 
 ### Content Logging
 
@@ -365,7 +365,7 @@ When content logging is enabled, the dashboard stores and displays:
 - The first user message in the conversation
 - A preview of the model's response
 
-This makes it easy to correlate a cost spike with the actual request that caused it. Content is stored locally only — nothing is sent to RelayPlane servers.
+This makes it easy to correlate a cost spike with the actual request that caused it. Content is stored locally only - nothing is sent to RelayPlane servers.
 
 ### Auth Passthrough (Claude Max / OpenClaw Users)
 
@@ -573,7 +573,7 @@ relayplane cache on/off   # Toggle caching
 
 ## Osmosis Mesh
 
-Opt-in collective learning layer. Share anonymized routing signals (model, task type, tokens, cost — never prompts) and benefit from the network's routing intelligence.
+Opt-in collective learning layer. Share anonymized routing signals (model, task type, tokens, cost - never prompts) and benefit from the network's routing intelligence.
 
 ```json
 {
@@ -617,14 +617,14 @@ The service unit includes `WatchdogSec=30` (systemd) and `KeepAlive` (launchd) f
 
 Configuration is protected against corruption:
 
-- **Atomic writes** — config is written to a `.tmp` file then renamed (no partial writes)
-- **Automatic backup** — `config.json.bak` is updated before every save
-- **Auto-restore** — if `config.json` is corrupt/missing, the proxy restores from backup
-- **Credential separation** — API keys live in `credentials.json`, surviving config resets
+- **Atomic writes** - config is written to a `.tmp` file then renamed (no partial writes)
+- **Automatic backup** - `config.json.bak` is updated before every save
+- **Auto-restore** - if `config.json` is corrupt/missing, the proxy restores from backup
+- **Credential separation** - API keys live in `credentials.json`, surviving config resets
 
 ## Circuit Breaker
 
-If the proxy ever fails, all traffic automatically bypasses it — your agent talks directly to the provider. When RelayPlane recovers, traffic resumes. No manual intervention needed.
+If the proxy ever fails, all traffic automatically bypasses it - your agent talks directly to the provider. When RelayPlane recovers, traffic resumes. No manual intervention needed.
 
 ## CLI Reference
 
@@ -657,9 +657,9 @@ relayplane [command] [options]
 |------|---------|-------------|
 | `--port <n>` | `4100` | Port to listen on |
 | `--host <s>` | `127.0.0.1` | Host to bind to |
-| `--offline` | — | No network calls except LLM endpoints |
-| `--audit` | — | Show telemetry payloads before sending |
-| `-v, --verbose` | — | Verbose logging |
+| `--offline` | - | No network calls except LLM endpoints |
+| `--audit` | - | Show telemetry payloads before sending |
+| `-v, --verbose` | - | Verbose logging |
 
 ## Cloud Dashboard & Pro Features
 
@@ -669,9 +669,9 @@ Cloud dashboard is **free for all signed-up users**. Just `relayplane login`. Fo
 
 | Feature | Plan |
 |---------|------|
-| Cloud dashboard — run history, cost trends, analytics | Free (all tiers) |
+| Cloud dashboard - run history, cost trends, analytics | Free (all tiers) |
 | 30-day cloud history, weekly cost digest, routing recommendations | Starter ($9/mo) |
-| Full mesh intelligence — routing signals from thousands of agents | Pro ($29/mo) |
+| Full mesh intelligence - routing signals from thousands of agents | Pro ($29/mo) |
 | 90-day history, data export, cost spike alerts | Pro |
 | Private team mesh, per-agent spend limits, approval flows | Max ($99/mo) |
 | Governance & compliance rules, audit logs | Max |
@@ -681,18 +681,18 @@ Cloud dashboard is **free for all signed-up users**. Just `relayplane login`. Fo
 ### Connecting to Cloud
 
 ```bash
-relayplane login    # authenticate — unlocks cloud dashboard (free)
+relayplane login    # authenticate - unlocks cloud dashboard (free)
 ```
 
 Telemetry is on by default. The cloud dashboard requires it to display your data. Disable anytime: `relayplane telemetry off`.
 
-> **Privacy-first:** Telemetry sends only anonymous metadata — model name, token counts, cost, latency. Your prompts, inputs, and outputs **never leave your machine**. Mesh is also on by default; opt out: `relayplane mesh off`.
+> **Privacy-first:** Telemetry sends only anonymous metadata - model name, token counts, cost, latency. Your prompts, inputs, and outputs **never leave your machine**. Mesh is also on by default; opt out: `relayplane mesh off`.
 
 ---
 
 ## Your Keys Stay Yours
 
-RelayPlane requires your own provider API keys. Your prompts go directly to LLM providers — never through RelayPlane servers. All proxy execution is local. Mesh telemetry (anonymous metadata only) is on by default. Opt out: `relayplane mesh off`. Your prompts always go directly to providers.
+RelayPlane requires your own provider API keys. Your prompts go directly to LLM providers - never through RelayPlane servers. All proxy execution is local. Mesh telemetry (anonymous metadata only) is on by default. Opt out: `relayplane mesh off`. Your prompts always go directly to providers.
 
 ## License
 
