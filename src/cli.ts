@@ -63,10 +63,6 @@ import { homedir } from 'os';
 import { getResponseCache } from './response-cache.js';
 import { getBudgetManager } from './budget.js';
 import { getAlertManager } from './alerts.js';
-import {
-  loadAgentCredentials,
-  saveAgentCredentials,
-} from './credentials.js';
 
 // __dirname is available natively in CJS
 
@@ -1238,118 +1234,6 @@ WantedBy=multi-user.target
   }
 }
 
-// ============================================
-// SIGNUP COMMAND (Agent-Native)
-// ============================================
-
-async function handleSignupCommand(args: string[]): Promise<void> {
-  const emailIdx = args.indexOf('--email');
-  const walletIdx = args.indexOf('--wallet');
-  const email = emailIdx !== -1 ? args[emailIdx + 1] : undefined;
-  const wallet = walletIdx !== -1 ? args[walletIdx + 1] : undefined;
-
-  if (!email && !wallet) {
-    console.error('');
-    console.error('  Usage: relayplane signup [--email <email>] [--wallet <address>]');
-    console.error('  At least one of --email or --wallet is required.');
-    console.error('');
-    process.exit(1);
-  }
-
-  const config = loadConfig();
-  const device_id = config.device_id;
-
-  console.log('');
-  console.log('  Creating RelayPlane account...');
-  console.log('');
-
-  try {
-    const res = await fetch(`${API_URL}/v1/auth/signup`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        device_id,
-        ...(email ? { email } : {}),
-        ...(wallet ? { wallet_address: wallet } : {}),
-      }),
-    });
-
-    const data = await res.json() as Record<string, string>;
-
-    if (!res.ok) {
-      console.error(`  Failed: ${data['error'] ?? res.statusText}`);
-      process.exit(1);
-    }
-
-    const { api_key, account_id, tier } = data;
-
-    saveAgentCredentials({ api_key, account_id, tier });
-
-    console.log('  Account ready!');
-    console.log(`  Account ID: ${account_id}`);
-    console.log(`  Tier:       ${tier}`);
-    console.log(`  API Key:    ${api_key.slice(0, 18)}...`);
-    console.log('');
-    console.log('  Run `relayplane subscription status` to check your subscription.');
-    console.log('');
-  } catch (err) {
-    console.error('  Failed:', err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-
-// ============================================
-// SUBSCRIPTION COMMAND
-// ============================================
-
-async function handleSubscriptionCommand(args: string[]): Promise<void> {
-  const sub = args[0] ?? 'status';
-
-  if (sub !== 'status') {
-    console.log('Usage: relayplane subscription [status]');
-    return;
-  }
-
-  const creds = loadAgentCredentials();
-  const apiKey = creds.api_key ?? creds.apiKey;
-
-  if (!apiKey) {
-    console.log('');
-    console.log('  Not signed up. Run `relayplane signup` first.');
-    console.log('');
-    return;
-  }
-
-  try {
-    const res = await fetch(`${API_URL}/v1/auth/account`, {
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-    });
-
-    if (!res.ok) {
-      console.error('  Failed to fetch subscription status.');
-      process.exit(1);
-    }
-
-    const data = await res.json() as Record<string, unknown>;
-    const sub = data['subscription'] as { status: string; expires_at: string } | null;
-
-    console.log('');
-    console.log('  Subscription Status');
-    console.log('  ═══════════════════');
-    console.log(`  Tier:    ${data['tier']}`);
-    if (sub) {
-      console.log(`  Status:  ${sub.status}`);
-      console.log(`  Expires: ${sub.expires_at}`);
-    } else {
-      console.log('  Status:  free — no subscription');
-    }
-    console.log('');
-  } catch (err) {
-    console.error('  Error:', err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
@@ -1369,6 +1253,26 @@ async function main(): Promise<void> {
   const command = args[0];
   
   if (command === 'init') {
+    // Auto-load .env file before key detection
+    const envPathsInit = [join(process.cwd(), '.env'), join(homedir(), '.env')];
+    for (const envPath of envPathsInit) {
+      if (existsSync(envPath)) {
+        try {
+          const lines = readFileSync(envPath, 'utf-8').split('\n');
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            const eqIdx = trimmed.indexOf('=');
+            if (eqIdx < 1) continue;
+            const key = trimmed.slice(0, eqIdx).trim();
+            const val = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
+            if (key && !process.env[key]) process.env[key] = val;
+          }
+        } catch { /* best-effort */ }
+        break;
+      }
+    }
+
     // Ensure config exists (loadConfig creates default if missing)
     const config = loadConfig();
     const configPath = getConfigPath();
@@ -1418,7 +1322,6 @@ async function main(): Promise<void> {
   const knownCommands = new Set([
     'init', 'start', 'telemetry', 'stats', 'config', 'login', 'logout', 'upgrade',
     'status', 'autostart', 'service', 'mesh', 'cache', 'budget', 'alerts', 'enable', 'disable',
-    'signup', 'subscription',
   ]);
 
   if (command && !command.startsWith('-') && !knownCommands.has(command)) {
@@ -1502,16 +1405,6 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  if (command === 'signup') {
-    await handleSignupCommand(args.slice(1));
-    process.exit(0);
-  }
-
-  if (command === 'subscription') {
-    await handleSubscriptionCommand(args.slice(1));
-    process.exit(0);
-  }
-
   // Parse server options
   let port = 4100;
   let host = '127.0.0.1';
@@ -1554,6 +1447,28 @@ async function main(): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
 
+  // Auto-load .env file (cwd first, then home directory) so keys set in .env work without manual export
+  const envPaths = [join(process.cwd(), '.env'), join(homedir(), '.env')];
+  for (const envPath of envPaths) {
+    if (existsSync(envPath)) {
+      try {
+        const lines = readFileSync(envPath, 'utf-8').split('\n');
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) continue;
+          const eqIdx = trimmed.indexOf('=');
+          if (eqIdx < 1) continue;
+          const key = trimmed.slice(0, eqIdx).trim();
+          const val = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
+          if (key && !process.env[key]) {
+            process.env[key] = val;
+          }
+        }
+      } catch { /* best-effort */ }
+      break; // Only load first .env found
+    }
+  }
+
   // Check for at least one API key
   const hasAnthropicKey = !!process.env['ANTHROPIC_API_KEY'];
   const hasOpenAIKey = !!process.env['OPENAI_API_KEY'];
@@ -1562,10 +1477,14 @@ async function main(): Promise<void> {
   const hasOpenRouterKey = !!process.env['OPENROUTER_API_KEY'];
   const hasDeepSeekKey = !!process.env['DEEPSEEK_API_KEY'];
   const hasGroqKey = !!process.env['GROQ_API_KEY'];
+  const hasMoonshotKey = !!process.env['MOONSHOT_API_KEY'];
 
-  if (!hasAnthropicKey && !hasOpenAIKey && !hasGeminiKey && !hasXAIKey && !hasOpenRouterKey && !hasDeepSeekKey && !hasGroqKey) {
+  if (!hasAnthropicKey && !hasOpenAIKey && !hasGeminiKey && !hasXAIKey && !hasOpenRouterKey && !hasDeepSeekKey && !hasGroqKey && !hasMoonshotKey) {
     console.error('Error: No API keys found. Set at least one of:');
-    console.error('  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, MOONSHOT_API_KEY');
+    console.error('  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY,');
+    console.error('  OPENROUTER_API_KEY, DEEPSEEK_API_KEY, GROQ_API_KEY, MOONSHOT_API_KEY');
+    console.error('');
+    console.error('Tip: Keys can be set in a .env file in your current directory or home folder.');
     process.exit(1);
   }
 

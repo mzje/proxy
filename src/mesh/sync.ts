@@ -147,14 +147,28 @@ export class MeshSyncManager {
     }
   }
 
+  private _consecutiveErrors = 0;
+  private _silenced = false;
+
   async doSync(): Promise<SyncResult> {
     const result = await syncWithMesh(this.store, this.endpoint, this.apiKey);
     this.lastSync = result.timestamp;
     this.lastErrors = result.errors;
     if (result.errors.length > 0) {
-      console.log(`[MESH] Sync errors: ${result.errors.join('; ')}`);
-    } else if (result.pushed > 0 || result.pulled > 0) {
-      console.log(`[MESH] Synced: pushed ${result.pushed}, pulled ${result.pulled}`);
+      this._consecutiveErrors++;
+      if (!this._silenced) {
+        console.log(`[MESH] Sync errors: ${result.errors.join('; ')}`);
+        if (this._consecutiveErrors >= 3) {
+          console.log('[MESH] Repeated sync failures — suppressing further warnings. Run `relayplane mesh status` to check.');
+          this._silenced = true;
+        }
+      }
+    } else {
+      this._consecutiveErrors = 0;
+      this._silenced = false;
+      if (result.pushed > 0 || result.pulled > 0) {
+        console.log(`[MESH] Synced: pushed ${result.pushed}, pulled ${result.pulled}`);
+      }
     }
     return result;
   }
