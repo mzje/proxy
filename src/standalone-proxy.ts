@@ -486,8 +486,14 @@ function parseComplexityModel(
   if (typeof val === 'string') {
     if (val.includes('/')) {
       const idx = val.indexOf('/');
-      const provider = val.slice(0, idx) as Provider;
+      const rawProvider = val.slice(0, idx);
       const model = val.slice(idx + 1); // preserves openrouter/anthropic/claude-... style
+      const knownProviders: Provider[] = ['openai', 'anthropic', 'google', 'xai', 'openrouter', 'deepseek', 'groq', 'local', 'ollama'];
+      if (!knownProviders.includes(rawProvider as Provider)) {
+        console.warn(`[parseComplexityModel] Unknown provider "${rawProvider}" in config, falling back to anthropic`);
+        return { provider: 'anthropic' as Provider, model };
+      }
+      const provider = rawProvider as Provider;
       return { provider, model };
     }
     // Plain model name — look up in MODEL_MAPPING, fallback to anthropic
@@ -1950,9 +1956,14 @@ function convertMessagesToGemini(messages: ChatRequest['messages']): unknown[] {
  * Recursively strip JSON Schema properties that Gemini rejects but OpenAI/Anthropic accept.
  * Gemini rejects: patternProperties, additionalProperties (boolean), $schema, definitions, $defs, unevaluatedProperties
  */
-function sanitizeSchemaForGemini(schema: unknown): unknown {
+function sanitizeSchemaForGemini(schema: unknown, _depth = 0, _nodeCount = { count: 0 }): unknown {
+  // Guard against deeply nested or extremely wide schemas (DoS prevention)
+  if (_depth > 20) return schema;
+  _nodeCount.count++;
+  if (_nodeCount.count > 10000) return schema;
+
   if (Array.isArray(schema)) {
-    return schema.map(sanitizeSchemaForGemini);
+    return schema.map(item => sanitizeSchemaForGemini(item, _depth + 1, _nodeCount));
   }
   if (schema !== null && typeof schema === 'object') {
     const obj = schema as Record<string, unknown>;
@@ -1966,7 +1977,7 @@ function sanitizeSchemaForGemini(schema: unknown): unknown {
       if (key === 'unevaluatedProperties') continue;
       // additionalProperties: Gemini only accepts object form, not boolean
       if (key === 'additionalProperties' && typeof value === 'boolean') continue;
-      result[key] = sanitizeSchemaForGemini(value);
+      result[key] = sanitizeSchemaForGemini(value, _depth + 1, _nodeCount);
     }
     return result;
   }
@@ -3374,7 +3385,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
     const isFirstRun = !rawFileHasRouting || !userConfig.first_run_complete;
 
     // Always detect available providers and update DEFAULT_ROUTING at startup
-    const availableProviders = detectAvailableProviders();
+    const availableProviders = detectAvailableProviders(userConfig as unknown as Record<string, unknown> | undefined);
     {
       // Build human-readable provider labels for startup log
       const providerLabels = availableProviders.map((p) => {
