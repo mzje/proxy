@@ -481,7 +481,13 @@ function parseComplexityModel(
   val: string | { provider: string; model: string }
 ): { provider: Provider; model: string } {
   if (typeof val === 'object' && val !== null) {
-    return val as { provider: Provider; model: string };
+    const knownProviders: Provider[] = ['openai', 'anthropic', 'google', 'xai', 'openrouter', 'deepseek', 'groq', 'local', 'ollama'];
+    const p = val.provider as Provider;
+    if (!knownProviders.includes(p)) {
+      console.warn(`[parseComplexityModel] Unknown provider "${val.provider}" in object config, falling back to anthropic`);
+      return { provider: 'anthropic' as Provider, model: val.model };
+    }
+    return { provider: p, model: val.model };
   }
   if (typeof val === 'string') {
     if (val.includes('/')) {

@@ -3,7 +3,9 @@
 [![npm](https://img.shields.io/npm/v/@relayplane/proxy)](https://www.npmjs.com/package/@relayplane/proxy)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/RelayPlane/proxy/blob/main/LICENSE)
 
-An open-source LLM proxy that sits between your AI agents and providers. Tracks every request, shows where the money goes, and offers configurable task-aware routing - all running **locally, for free**.
+A **Node.js npm LLM proxy** that sits between your AI agents and providers. Drop-in replacement for OpenAI and Anthropic base URLs — no Docker, no Python, just `npm install`. Tracks every request, shows where the money goes, and offers configurable task-aware routing — all running **locally, for free**.
+
+**The npm-native LLM proxy for Node.js developers.** Works with Claude Code, Cursor, OpenClaw, and any tool that supports `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL`.
 
 **Free, open-source proxy features:**
 - 📊 Per-request cost tracking across 11 providers
