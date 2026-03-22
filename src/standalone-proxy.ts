@@ -3107,6 +3107,7 @@ td{padding:8px 12px;border-bottom:1px solid #111318}
 <div class="section collapsible collapsed"><h2>Agent Cost Breakdown</h2>
 <table><thead><tr><th>Agent</th><th>Requests</th><th>Total Cost</th><th>Last Active</th><th></th></tr></thead><tbody id="agents"></tbody></table></div>
 <div class="section"><h2>Provider Status</h2><div class="prov" id="providers"></div></div>
+<div class="section collapsible collapsed"><h2>Learning</h2><div id="learning-panel" style="display:flex;flex-direction:column;gap:12px"><div id="learning-stats" style="display:flex;gap:12px;flex-wrap:wrap"></div><div id="learning-recent"></div><div style="margin-top:8px;padding:10px 14px;background:#0f1720;border:1px solid #1e3a5f;border-radius:8px;font-size:.8rem;color:#60a5fa">Network: Join the network to share with 1,000+ agent installations &rarr; <a href="https://relayplane.com/pricing" style="color:#34d399">Upgrade</a></div></div></div>
 <div class="section"><h2>Recent Runs <span id="historyLabel" style="font-size:.75rem;color:#64748b;font-weight:400">(7d window, history-capped)</span></h2>
 <table><thead><tr><th>Time</th><th>Agent</th><th>Model</th><th class="col-tt">Task Type</th><th class="col-cx">Complexity</th><th>Tokens In</th><th>Tokens Out</th><th class="col-cache">Cache Create</th><th class="col-cache">Cache Read</th><th>Cost</th><th>Latency</th><th>Status</th></tr></thead><tbody id="runs"></tbody></table></div>
 <script>
@@ -3237,8 +3238,102 @@ async function loadFullResponse(runId,i){
     else{btn.textContent='No full response available'}
   }catch{btn.textContent='Error loading response'}
 }
-load();setInterval(load,5000);
+async function loadLearning(){
+  try{
+    const k=await fetch('/v1/knowledge/stats').then(r=>r.json()).catch(()=>null);
+    if(!k)return;
+    const statsEl=$('learning-stats');
+    const recentEl=$('learning-recent');
+    if(statsEl){
+      statsEl.innerHTML='<div class="card" style="flex:1;min-width:140px"><div class="label">Total Learnings</div><div class="value">'+k.totalLearnings+'</div></div>'+
+        '<div class="card" style="flex:1;min-width:140px"><div class="label">Recent (7d)</div><div class="value">'+k.recentLearnings.length+'</div></div>'+
+        '<div class="card" style="flex:2;min-width:200px"><div class="label">Knowledge Files</div><div class="value" style="font-size:.9rem;line-height:1.6">'+
+        (k.fileStats.length?k.fileStats.map(function(f){return '<span style="color:#94a3b8;font-weight:400">'+f.file+'</span> <span style="color:#34d399">'+f.learnings+'</span>'}).join(' &middot; '):'—')+'</div></div>';
+    }
+    if(recentEl){
+      if(k.recentLearnings.length){
+        recentEl.innerHTML='<div style="font-size:.8rem;color:#64748b;margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em">Recent Learnings (7d)</div>'+
+          k.recentLearnings.map(function(l){return '<div style="padding:8px 12px;background:#111318;border:1px solid #1e293b;border-radius:8px;margin-bottom:6px;font-size:.85rem"><span style="color:#64748b;font-size:.75rem">'+l.date+' · @'+l.agent+'</span><div style="margin-top:4px">'+l.preview+'</div></div>'}).join('');
+      }else{
+        recentEl.innerHTML='<div style="color:#64748b;font-size:.85rem">No learnings recorded yet. Run <code style="background:#1e293b;padding:2px 6px;border-radius:4px">node packages/proxy/scripts/extract-knowledge.js</code> after agent sessions.</div>';
+      }
+    }
+  }catch(e){console.error('learning load error',e)}
+}
+load();loadLearning();setInterval(load,5000);setInterval(loadLearning,30000);
 </script><footer style="text-align:center;padding:20px 0;color:#475569;font-size:.75rem;border-top:1px solid #1e293b;margin-top:20px">🔒 Request content stays on your machine. Never sent to cloud.</footer></body></html>`;
+}
+
+// ── Knowledge stats ─────────────────────────────────────────────────────────
+interface KnowledgeLearning {
+  date: string;
+  agent: string;
+  preview: string;
+}
+
+interface KnowledgeStats {
+  totalLearnings: number;
+  recentLearnings: KnowledgeLearning[];
+  fileStats: { file: string; learnings: number }[];
+  knowledgeDir: string;
+}
+
+async function getKnowledgeStats(): Promise<KnowledgeStats> {
+  const knowledgeDir = path.join(os.homedir(), '.openclaw', 'workspace', 'knowledge');
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+  let totalLearnings = 0;
+  const recentLearnings: KnowledgeLearning[] = [];
+  const fileStats: { file: string; learnings: number }[] = [];
+
+  let files: string[] = [];
+  try {
+    files = await fs.promises.readdir(knowledgeDir);
+  } catch {
+    // directory may not exist yet
+    return { totalLearnings: 0, recentLearnings: [], fileStats: [], knowledgeDir };
+  }
+
+  for (const file of files.filter((f) => f.endsWith('.md'))) {
+    const filePath = path.join(knowledgeDir, file);
+    let content: string;
+    try {
+      content = await fs.promises.readFile(filePath, 'utf8');
+    } catch {
+      continue;
+    }
+
+    // Count <!-- [YYYY-MM-DD] agent:xxx --> markers as learning entries
+    const markerRegex = /<!--\s*\[(\d{4}-\d{2}-\d{2})\]\s*agent:(\w+)\s*-->\n([\s\S]*?)(?=<!--|\s*$)/g;
+    let match: RegExpExecArray | null;
+    let fileCount = 0;
+
+    while ((match = markerRegex.exec(content)) !== null) {
+      const dateStr = match[1];
+      const agent = match[2];
+      const body = match[3].trim();
+      fileCount++;
+      totalLearnings++;
+
+      const entryDate = new Date(dateStr);
+      if (entryDate >= sevenDaysAgo) {
+        // Extract first bullet as preview
+        const firstLine = body.split('\n').find((l) => l.trim().startsWith('-')) || body.split('\n')[0] || '';
+        recentLearnings.push({
+          date: dateStr,
+          agent,
+          preview: firstLine.replace(/^-\s*/, '').slice(0, 100),
+        });
+      }
+    }
+
+    fileStats.push({ file, learnings: fileCount });
+  }
+
+  recentLearnings.sort((a, b) => b.date.localeCompare(a.date));
+
+  return { totalLearnings, recentLearnings: recentLearnings.slice(0, 10), fileStats, knowledgeDir };
 }
 
 function getConfigDashboardHTML(): string {
@@ -4217,6 +4312,19 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
       } catch (err: any) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ sync: { error: err.message } }));
+      }
+      return;
+    }
+
+    // === Knowledge stats endpoint ===
+    if (req.method === 'GET' && pathname === '/v1/knowledge/stats') {
+      try {
+        const stats = await getKnowledgeStats();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(stats));
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
       }
       return;
     }
