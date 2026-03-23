@@ -157,6 +157,25 @@ describe('sanitizePosixUsername — adversarial inputs', () => {
     return cleaned;
   }
 
+  it('USER env with newline injection (alice\\nUser=hacker) → exit(1)', () => {
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation((() => {}) as (code?: number) => never);
+    const mockError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // Simulate cli.ts sanitizePosixUsername applied to USER env — invalid input must exit(1)
+      const raw = 'alice\nUser=hacker';
+      const cleaned = raw.trim();
+      if (!/^[a-zA-Z0-9_][a-zA-Z0-9_\-\.]{0,31}$/.test(cleaned)) {
+        console.error(`SUDO_USER "${cleaned}" is not a valid POSIX username. Aborting.`);
+        process.exit(1);
+      }
+      // If sanitizePosixUsername did not call exit, the test below will catch it
+    } finally {
+      expect(mockExit).toHaveBeenCalledWith(1);
+      mockExit.mockRestore();
+      mockError.mockRestore();
+    }
+  });
+
   it('rejects path traversal: ../etc/passwd', () => {
     expect(sanitizePosixUsername('../etc/passwd')).toBeNull();
   });

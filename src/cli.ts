@@ -759,7 +759,7 @@ async function handleAutostartCommand(args: string[]): Promise<void> {
       serviceUser = sudoUser;
       serviceHome = `/home/${sudoUser}`;
     } else {
-      const userEnv = process.env.USER;
+      const userEnv = sanitizePosixUsername(process.env.USER);
       serviceUser = (userEnv && userEnv !== 'root') ? userEnv : 'root';
       serviceHome = (userEnv && userEnv !== 'root') ? `/home/${userEnv}` : homedir();
     }
@@ -1068,7 +1068,7 @@ async function handleServiceCommand(args: string[]): Promise<void> {
         serviceUser = sudoUser;
         serviceHome = `/home/${sudoUser}`;
       } else {
-        const userEnv = process.env.USER;
+        const userEnv = sanitizePosixUsername(process.env.USER);
         serviceUser = (userEnv && userEnv !== 'root') ? userEnv : 'root';
         serviceHome = (userEnv && userEnv !== 'root') ? `/home/${userEnv}` : homedir();
       }
