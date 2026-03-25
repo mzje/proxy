@@ -176,6 +176,7 @@ describe('sanitizePosixUsername — adversarial inputs', () => {
     }
   });
 
+
   it('rejects path traversal: ../etc/passwd', () => {
     expect(sanitizePosixUsername('../etc/passwd')).toBeNull();
   });
