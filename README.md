@@ -41,15 +41,17 @@ relayplane start
 
 Works with any agent framework that talks to OpenAI or Anthropic APIs. Point your client at `http://localhost:4100` (set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`) and the proxy handles the rest.
 
-## What's New in v1.8.14+
+## What's New in v1.8.35
 
-**Breaking changes for upgraders:**
+**Recent additions:**
 
-- **Telemetry is now ON by default.** Previously opt-in. Anonymous metadata (model, tokens, cost, latency) is sent to power the cloud dashboard. Your prompts and responses are never collected. Disable: `relayplane telemetry off`
-- **Mesh is now ON by default.** Your proxy contributes anonymized routing data to the collective network. Free users get provider health alerts. Pro users get full routing intelligence. Disable: `relayplane mesh off`
-- **Cloud dashboard is now free.** Previously required a paid plan. Just `relayplane login` to access your data at relayplane.com/dashboard.
+- **[relayplane.com/live](https://relayplane.com/live)** — Atlas public proof-of-work dashboard showing real-time aggregate savings from developers worldwide
+- **Osmosis Phase 1 shipped** — local telemetry capture tracks every routing decision; mesh is on by default
+- **Service installer hardened** — detects invoking user, loads env files correctly on systemd installs
+- **Provider-aware auto-routing** — Gemini, OpenRouter, xAI supported natively without extra config
+- **Agent-native signup flow** — `relayplane login` handles device OAuth inline
 
-If you prefer the old behavior: `relayplane telemetry off && relayplane mesh off`
+**Note for upgraders from pre-v1.8.14:** Telemetry and mesh are now ON by default. Disable both: `relayplane telemetry off && relayplane mesh off`
 
 ## Supported Providers
 
@@ -590,7 +592,7 @@ Opt-in collective learning layer. Share anonymized routing signals (model, task 
 }
 ```
 
-On by default for all users as of v1.9. Opt out: `relayplane mesh off`. Free users receive provider health alerts; Pro users receive full routing intelligence.
+On by default. Opt out: `relayplane mesh off`. Free users receive provider health alerts; Pro users receive full routing intelligence.
 
 ```bash
 relayplane mesh status              # Atoms local/synced, last sync, endpoint

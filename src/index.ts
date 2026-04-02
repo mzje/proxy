@@ -121,3 +121,24 @@ export type {
 // Advanced proxy server (requires @relayplane/ledger, @relayplane/auth-gate, etc.)
 export { ProxyServer, createProxyServer, createSandboxedProxyServer } from './server.js';
 export type { ProxyServerConfig } from './server.js';
+
+// Tool Router — deny-by-default tool authorization (Phase 2, Session 3)
+export {
+  ToolRouter,
+  getToolRouter,
+  resetToolRouter,
+  extractToolContext,
+  BUILTIN_PACKS,
+  DEFAULT_TOOL_ROUTER_CONFIG,
+} from './tool-router.js';
+export type {
+  ToolEntry,
+  ToolPack,
+  ToolRateLimit,
+  AgentAuthConfig,
+  ToolAuthContext,
+  ToolAuthResult,
+  ToolRouterConfig,
+  ToolSchema,
+  RateLimitCheckResult,
+} from './tool-router.js';

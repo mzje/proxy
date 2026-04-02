@@ -35,9 +35,48 @@ export interface ProviderRateLimitConfig {
   rpm: number;
 }
 
+/**
+ * A single named account (API key or OAT token) for a provider.
+ * Used to build the multi-account token pool.
+ *
+ * Example ~/.relayplane/config.json:
+ * ```json
+ * {
+ *   "providers": {
+ *     "anthropic": {
+ *       "accounts": [
+ *         { "label": "newmax", "apiKey": "sk-ant-oat01-...", "priority": 0 },
+ *         { "label": "default", "apiKey": "sk-ant-oat01-...", "priority": 1 }
+ *       ]
+ *     }
+ *   }
+ * }
+ * ```
+ */
+export interface ProviderAccountConfig {
+  /** Human-readable label shown in the dashboard */
+  label: string;
+  /** API key or OAT token */
+  apiKey: string;
+  /**
+   * Selection priority — lower number = tried first.
+   * Default: 0.
+   */
+  priority?: number;
+}
+
 export interface ProviderConfig {
   /** Provider-level rate limit. Applies to all models for this provider unless overridden per-model. */
   rateLimit?: ProviderRateLimitConfig;
+  /**
+   * Multi-account token pool.  When present, the proxy will pool these
+   * tokens and select the best available one per request.  Tokens with
+   * lower priority numbers are preferred.  Rate-limited tokens are skipped.
+   *
+   * Backward compatible: if absent, the proxy falls back to the single-token
+   * flow (ANTHROPIC_API_KEY env var or incoming Authorization header).
+   */
+  accounts?: ProviderAccountConfig[];
 }
 
 /**
@@ -131,6 +170,29 @@ export interface ProxyConfig {
    * retry with the next provider in the `providers` cascade list.
    */
   crossProviderCascade?: CrossProviderCascadeConfigSection;
+
+  /**
+   * Deterministic trace files (CAP 3).
+   * Writes per-request JSONL trace files to ~/.relayplane/traces/ and maintains
+   * a SQLite index for querying. Enabled by default; privacy-safe (hashes only).
+   */
+  traces?: TracesConfig;
+}
+
+export interface TracesConfig {
+  /** Enable trace file writing (default: true) */
+  enabled: boolean;
+  /**
+   * Store full request/response bodies for replay (default: false — hashes only).
+   * Set true only for debugging; bodies may contain sensitive data.
+   */
+  storeFullRequests: boolean;
+  /** Delete trace files older than this many days (default: 30) */
+  retentionDays: number;
+  /** Directory for trace files (default: ~/.relayplane/traces/) */
+  directory: string;
+  /** Prune oldest files when total traces dir exceeds this size in MB (default: 500) */
+  maxDiskMb: number;
 }
 
 const CONFIG_VERSION = 1;

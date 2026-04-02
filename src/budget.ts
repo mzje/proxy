@@ -29,6 +29,29 @@ export interface BudgetConfig {
   alertWebhook?: string;
   /** Alert thresholds as percentages of daily limit */
   alertThresholds: number[];
+  /** Per-session spend cap in USD (default: 1.00). Session budget is only active when a session ID is present. */
+  sessionCapUsd: number;
+  /** Model downgrade ladder — when a session exceeds 80% of its cap, downgrade to the next rung */
+  modelLadder: string[];
+}
+
+// ─── Session Budget Types ────────────────────────────────────────────
+
+export interface SessionBudgetRecord {
+  sessionId: string;
+  capUsd: number;
+  spentUsd: number;
+  modelUsed: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SessionBudgetCheckResult {
+  allowed: boolean;
+  model: string;
+  reason?: string;
+  spent: number;
+  cap: number;
 }
 
 export interface BudgetStatus {
@@ -72,6 +95,8 @@ export const DEFAULT_BUDGET_CONFIG: BudgetConfig = {
   onBreach: 'downgrade',
   downgradeTo: 'claude-sonnet-4-6',
   alertThresholds: [50, 80, 95],
+  sessionCapUsd: 1.00,
+  modelLadder: ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5'],
 };
 
 // ─── Window helpers ──────────────────────────────────────────────────
@@ -125,6 +150,9 @@ export class BudgetManager {
   private pendingWrites: SpendRecord[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
 
+  // In-memory session budget cache: sessionId → SessionBudgetRecord
+  private sessionCache: Map<string, SessionBudgetRecord> = new Map();
+
   constructor(config?: Partial<BudgetConfig>) {
     this.config = { ...DEFAULT_BUDGET_CONFIG, ...config };
   }
@@ -152,6 +180,15 @@ export class BudgetManager {
         );
         CREATE INDEX IF NOT EXISTS idx_daily_window ON spend_log(daily_window);
         CREATE INDEX IF NOT EXISTS idx_hourly_window ON spend_log(hourly_window);
+
+        CREATE TABLE IF NOT EXISTS session_budgets (
+          session_id TEXT PRIMARY KEY,
+          cap_usd REAL NOT NULL,
+          spent_usd REAL NOT NULL DEFAULT 0,
+          model_used TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
       `);
 
       // Load current window totals into memory
@@ -321,6 +358,181 @@ export class BudgetManager {
     if (limits.dailyUsd !== undefined) this.config.dailyUsd = limits.dailyUsd;
     if (limits.hourlyUsd !== undefined) this.config.hourlyUsd = limits.hourlyUsd;
     if (limits.perRequestUsd !== undefined) this.config.perRequestUsd = limits.perRequestUsd;
+  }
+
+  // ─── Session Budget ──────────────────────────────────────────────
+
+  /**
+   * Pre-request session budget check.
+   * Returns whether the request is allowed, possibly with a downgraded model.
+   * Called only when X-Claude-Code-Session-Id header is present.
+   */
+  checkSessionBudget(sessionId: string, requestedModel: string): SessionBudgetCheckResult {
+    const record = this._getOrCreateSessionRecord(sessionId, this.config.sessionCapUsd);
+    const spent = record.spentUsd;
+    const cap = record.capUsd;
+
+    if (spent >= cap) {
+      return { allowed: false, model: requestedModel, reason: 'session_budget_exceeded', spent, cap };
+    }
+
+    // Downgrade if >80% of cap spent
+    const pct = cap > 0 ? spent / cap : 0;
+    let model = requestedModel;
+    if (pct >= 0.8) {
+      model = this._nextLadderModel(requestedModel);
+    }
+
+    return { allowed: true, model, spent, cap };
+  }
+
+  /**
+   * Post-request: record actual cost for a session.
+   * Fire-and-forget — updates in-memory cache immediately, writes SQLite async.
+   */
+  updateSessionBudget(sessionId: string, cost: number, modelUsed: string): void {
+    const cap = this.config.sessionCapUsd;
+    const record = this._getOrCreateSessionRecord(sessionId, cap);
+    record.spentUsd += cost;
+    record.modelUsed = modelUsed;
+    record.updatedAt = Date.now();
+    this.sessionCache.set(sessionId, record);
+
+    // Async SQLite write (fire-and-forget)
+    if (this.db) {
+      setImmediate(() => {
+        try {
+          this.db!.prepare(`
+            INSERT INTO session_budgets (session_id, cap_usd, spent_usd, model_used, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+              spent_usd = excluded.spent_usd,
+              model_used = excluded.model_used,
+              updated_at = excluded.updated_at
+          `).run(sessionId, record.capUsd, record.spentUsd, record.modelUsed, record.createdAt, record.updatedAt);
+        } catch {
+          // SQLite writes are best-effort; in-memory cache is authoritative
+        }
+      });
+    }
+  }
+
+  /** Get session budget record by session ID */
+  getSessionBudget(sessionId: string): SessionBudgetRecord | null {
+    if (this.sessionCache.has(sessionId)) {
+      return { ...this.sessionCache.get(sessionId)! };
+    }
+    if (this.db) {
+      const row = this.db.prepare(
+        'SELECT session_id, cap_usd, spent_usd, model_used, created_at, updated_at FROM session_budgets WHERE session_id = ?'
+      ).get(sessionId) as { session_id: string; cap_usd: number; spent_usd: number; model_used: string; created_at: number; updated_at: number } | undefined;
+      if (row) {
+        const record: SessionBudgetRecord = {
+          sessionId: row.session_id,
+          capUsd: row.cap_usd,
+          spentUsd: row.spent_usd,
+          modelUsed: row.model_used,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        };
+        this.sessionCache.set(sessionId, record);
+        return { ...record };
+      }
+    }
+    return null;
+  }
+
+  /** List recent session budget records (last N by updated_at) */
+  listSessionBudgets(limit = 50): SessionBudgetRecord[] {
+    if (this.db) {
+      const rows = this.db.prepare(
+        'SELECT session_id, cap_usd, spent_usd, model_used, created_at, updated_at FROM session_budgets ORDER BY updated_at DESC LIMIT ?'
+      ).all(limit) as Array<{ session_id: string; cap_usd: number; spent_usd: number; model_used: string; created_at: number; updated_at: number }>;
+      return rows.map(row => ({
+        sessionId: row.session_id,
+        capUsd: row.cap_usd,
+        spentUsd: row.spent_usd,
+        modelUsed: row.model_used,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+    }
+    // Memory-only fallback
+    return Array.from(this.sessionCache.values())
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, limit)
+      .map(r => ({ ...r }));
+  }
+
+  /** Override the per-session cap for a specific session */
+  setSessionCap(sessionId: string, capUsd: number): void {
+    const existing = this._getOrCreateSessionRecord(sessionId, this.config.sessionCapUsd);
+    existing.capUsd = capUsd;
+    existing.updatedAt = Date.now();
+    this.sessionCache.set(sessionId, existing);
+
+    if (this.db) {
+      setImmediate(() => {
+        try {
+          this.db!.prepare(`
+            INSERT INTO session_budgets (session_id, cap_usd, spent_usd, model_used, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+              cap_usd = excluded.cap_usd,
+              updated_at = excluded.updated_at
+          `).run(sessionId, capUsd, existing.spentUsd, existing.modelUsed, existing.createdAt, existing.updatedAt);
+        } catch {
+          // best-effort
+        }
+      });
+    }
+  }
+
+  // ─── Private session helpers ──────────────────────────────────────
+
+  private _getOrCreateSessionRecord(sessionId: string, defaultCap: number): SessionBudgetRecord {
+    if (this.sessionCache.has(sessionId)) {
+      return this.sessionCache.get(sessionId)!;
+    }
+    // Try SQLite
+    if (this.db) {
+      const row = this.db.prepare(
+        'SELECT session_id, cap_usd, spent_usd, model_used, created_at, updated_at FROM session_budgets WHERE session_id = ?'
+      ).get(sessionId) as { session_id: string; cap_usd: number; spent_usd: number; model_used: string; created_at: number; updated_at: number } | undefined;
+      if (row) {
+        const record: SessionBudgetRecord = {
+          sessionId: row.session_id,
+          capUsd: row.cap_usd,
+          spentUsd: row.spent_usd,
+          modelUsed: row.model_used,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        };
+        this.sessionCache.set(sessionId, record);
+        return record;
+      }
+    }
+    // Create new in-memory record
+    const now = Date.now();
+    const record: SessionBudgetRecord = {
+      sessionId,
+      capUsd: defaultCap,
+      spentUsd: 0,
+      modelUsed: '',
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.sessionCache.set(sessionId, record);
+    return record;
+  }
+
+  private _nextLadderModel(currentModel: string): string {
+    const ladder = this.config.modelLadder;
+    if (!ladder || ladder.length === 0) return currentModel;
+    const idx = ladder.indexOf(currentModel);
+    if (idx === -1) return currentModel; // model not in ladder, no change
+    if (idx >= ladder.length - 1) return currentModel; // already at bottom
+    return ladder[idx + 1]!;
   }
 
   /** Shutdown: flush pending writes */

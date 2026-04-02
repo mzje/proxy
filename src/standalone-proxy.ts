@@ -62,7 +62,7 @@ import {
   type CrossProviderCascadeConfig,
   type CascadeHop,
 } from './cross-provider-cascade.js';
-import { getBudgetManager, type BudgetConfig } from './budget.js';
+import { getBudgetManager, type BudgetConfig, type SessionBudgetCheckResult } from './budget.js';
 import { getAnomalyDetector, type AnomalyConfig } from './anomaly.js';
 import { getAlertManager, type AlertsConfig } from './alerts.js';
 import { checkDowngrade, applyDowngradeHeaders, type DowngradeConfig, DEFAULT_DOWNGRADE_CONFIG } from './downgrade.js';
@@ -79,7 +79,13 @@ const estimateRateMap = new Map<string, EstimateRateLimitEntry>();
 // Without this, IPs that make one request and disappear stay in the map forever.
 setInterval(() => purgeExpiredRateLimitEntries(estimateRateMap, Date.now()), 5 * 60 * 1000);
 
-import { captureAtom } from './osmosis-store.js';
+import { captureAtom, countAtomsForSession, getOsmosisDb, getRelayplaneDir } from './osmosis-store.js';
+import { writeEpisode } from './episode-writer.js';
+import { getSessionId, upsertSession, getSessions, getActiveSessions } from './session-tracker.js';
+import { TraceWriter, sha256Hex, defaultTracesConfig } from './trace-writer.js';
+import { getToolRouter, extractToolContext } from './tool-router.js';
+import { getTokenPool, type PoolAccountConfig } from './token-pool.js';
+import { randomUUID } from 'node:crypto';
 const PROXY_VERSION: string = (() => {
   try {
     const pkgPath = path.join(__dirname, '..', 'package.json');
@@ -797,6 +803,19 @@ interface RelayPlaneProxyConfigFile {
    * even models like `anthropic/claude-sonnet-4-6` or `claude-sonnet-4-6`.
    */
   defaultProvider?: string;
+  /**
+   * Session memory configuration (Phase 2 Session 4).
+   * Controls layered session memory: episodic event capture, semantic knowledge atoms,
+   * and procedural pattern injection.
+   */
+  memory?: {
+    /**
+     * When true, inject top procedural knowledge hints into system prompts.
+     * Default: false — no system prompt modification occurs.
+     * Can also be set via env RELAYPLANE_PROCEDURAL_INJECTION=true.
+     */
+    proceduralInjectionEnabled?: boolean;
+  };
   [key: string]: unknown;
 }
 
@@ -1193,6 +1212,18 @@ let _activeOllamaConfig: OllamaProviderConfig | undefined;
 
 function isContentLoggingEnabled(): boolean {
   return _activeProxyConfig.dashboard?.showRequestContent !== false;
+}
+
+/**
+ * Whether procedural knowledge hints should be injected into system prompts.
+ * Default: false — no system prompt modification occurs.
+ * Config file: memory.proceduralInjectionEnabled
+ * Env override: RELAYPLANE_PROCEDURAL_INJECTION=true
+ */
+function isProceduralInjectionEnabled(): boolean {
+  const envVal = process.env['RELAYPLANE_PROCEDURAL_INJECTION'];
+  if (envVal !== undefined) return envVal === 'true';
+  return _activeProxyConfig.memory?.proceduralInjectionEnabled === true;
 }
 
 function getProxyConfigPath(): string {
@@ -2956,7 +2987,16 @@ function resolveProviderApiKey(
         },
       };
     }
-    return { apiKey: envApiKey };
+    // Prefer env key when available; fall back to incoming auth (x-api-key or Authorization header).
+    // This handles local proxy setups where ANTHROPIC_API_KEY is not set but the caller
+    // forwards their token via x-api-key (e.g. OpenClaw relayplane provider).
+    if (envApiKey) return { apiKey: envApiKey };
+    if (ctx.apiKeyHeader) return { apiKey: ctx.apiKeyHeader };
+    if (ctx.authHeader) {
+      const token = ctx.authHeader.replace(/^Bearer\s+/i, '');
+      return { apiKey: token };
+    }
+    return { apiKey: undefined };
   }
 
   // Ollama doesn't need an API key — it's local
@@ -3110,7 +3150,7 @@ th{text-align:left;color:#64748b;font-weight:500;padding:8px 12px;border-bottom:
 td{padding:8px 12px;border-bottom:1px solid #111318}
 .section{margin-bottom:32px}.section h2{font-size:1rem;font-weight:600;margin-bottom:12px;color:#94a3b8}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}.dot.up{background:#34d399}.dot.warn{background:#fbbf24}.dot.down{background:#ef4444}
-.section.collapsible h2{cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px}.section.collapsible h2::after{content:'▾';font-size:.8rem;color:#475569;transition:transform .2s}.section.collapsed h2::after{transform:rotate(-90deg)}.section.collapsed>*:not(h2){display:none}
+.section.collapsible h2{cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px}.section.collapsible h2::after{content:'▾';font-size:.8rem;color:#475569;transition:transform .2s}.section.collapsed h2::after{transform:rotate(-90deg)}.section.collapsed>*:not(h2){display:none!important}
 .badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:.75rem;font-weight:500}
 .badge.ok{background:#052e1633;color:#34d399}.badge.err{background:#2d0a0a;color:#ef4444}.badge.err-auth{background:#2d0a0a;color:#ef4444}.badge.err-rate{background:#2d2a0a;color:#fbbf24}.badge.err-timeout{background:#2d1a0a;color:#fb923c}
 .badge.tt-code{background:#1e3a5f;color:#60a5fa}.badge.tt-analysis{background:#3b1f6e;color:#a78bfa}.badge.tt-summarization{background:#1a3a2a;color:#6ee7b7}.badge.tt-qa{background:#3a2f1e;color:#fbbf24}.badge.tt-general{background:#1e293b;color:#94a3b8}
@@ -3135,15 +3175,42 @@ td{padding:8px 12px;border-bottom:1px solid #111318}
 <div class="section collapsible collapsed"><h2>Agent Cost Breakdown</h2>
 <table><thead><tr><th>Agent</th><th>Requests</th><th>Total Cost</th><th>Last Active</th><th></th></tr></thead><tbody id="agents"></tbody></table></div>
 <div class="section"><h2>Provider Status</h2><div class="prov" id="providers"></div></div>
-<div class="section collapsible collapsed"><h2>Learning</h2><div id="learning-panel" style="display:flex;flex-direction:column;gap:12px"><div id="learning-stats" style="display:flex;gap:12px;flex-wrap:wrap"></div><div id="learning-recent"></div><div style="margin-top:8px;padding:10px 14px;background:#0f1720;border:1px solid #1e3a5f;border-radius:8px;font-size:.8rem;color:#60a5fa">Network: Join the network to share with 1,000+ agent installations &rarr; <a href="https://relayplane.com/pricing" style="color:#34d399">Upgrade</a></div></div></div>
+<div class="section collapsible collapsed"><h2>Learning</h2><div id="learning-panel" style="display:flex;flex-direction:column;gap:12px"><div id="learning-stats" style="display:flex;gap:12px;flex-wrap:wrap"></div><div id="learning-recent"></div></div></div>
+<div class="section collapsible" id="sessions-section"><h2>Sessions <span id="sessionsLabel" style="font-size:.75rem;color:#64748b;font-weight:400">(last 7d)</span></h2>
+<table><thead><tr><th>Session ID</th><th>Source</th><th>Started</th><th>Duration</th><th>Requests</th><th>Tokens In</th><th>Tokens Out</th><th>Cost</th><th>Models</th><th>Status</th></tr></thead><tbody id="sessions"></tbody></table>
+</div>
+<div class="section collapsible collapsed" id="token-pool-section"><h2>Token Pool</h2><div id="token-pool-panel"></div></div>
 <div class="section"><h2>Recent Runs <span id="historyLabel" style="font-size:.75rem;color:#64748b;font-weight:400">(7d window, history-capped)</span></h2>
 <table><thead><tr><th>Time</th><th>Agent</th><th>Model</th><th class="col-tt">Task Type</th><th class="col-cx">Complexity</th><th>Tokens In</th><th>Tokens Out</th><th class="col-cache">Cache Create</th><th class="col-cache">Cache Read</th><th>Cost</th><th>Latency</th><th>Status</th></tr></thead><tbody id="runs"></tbody></table></div>
 <script>
 const $ = id => document.getElementById(id);
+function esc(s){if(!s)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 document.querySelectorAll('.section.collapsible h2').forEach(h2=>h2.addEventListener('click',()=>h2.parentElement.classList.toggle('collapsed')));
 function fmt(n,d=2){return typeof n==='number'?n.toFixed(d):'-'}
 function fmtTime(s){const d=new Date(s);return d.toLocaleTimeString()}
 function dur(s){const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?h+'h '+m+'m':m+'m'}
+async function loadSessions(){
+  try{
+    const [sessR,activeR]=await Promise.all([
+      fetch('/v1/sessions?limit=20&days=7').then(r=>r.json()).catch(()=>({sessions:[]})),
+      fetch('/v1/sessions/active').then(r=>r.json()).catch(()=>({sessions:[]}))
+    ]);
+    const activeIds=new Set((activeR.sessions||[]).map(s=>s.id));
+    const sessions=sessR.sessions||[];
+    const el=$('sessions');
+    if(!el)return;
+    el.innerHTML=sessions.length?sessions.map(s=>{
+      const isActive=activeIds.has(s.id)||s.active;
+      const dur=s.duration_ms>0?Math.round(s.duration_ms/1000)+'s':'—';
+      const badge=isActive?'<span class="badge ok" style="font-size:.7rem">LIVE</span>':'<span style="color:#64748b;font-size:.75rem">idle</span>';
+      const srcBadge=s.session_source==='claude-code'?'<span style="color:#60a5fa;font-size:.75rem">claude-code</span>':'<span style="color:#94a3b8;font-size:.75rem">synthetic</span>';
+      const sid=s.id.length>20?s.id.slice(0,20)+'…':s.id;
+      const mix=s.model_mix&&Object.keys(s.model_mix).length?Object.entries(s.model_mix).map(([m,c])=>{const short=m.replace('claude-','').replace(/-\d{8}$/,'').replace('sonnet','Sonnet').replace('opus','Opus').replace('haiku','Haiku');return '<span style="font-size:.72rem;color:#94a3b8">'+short+'<span style="color:#475569">×</span>'+c+'</span>';}).join(' '):'<span style="color:#475569;font-size:.72rem">—</span>';
+      return '<tr><td style="font-family:monospace;font-size:.8rem" title="'+esc(s.id)+'">'+sid+'</td><td>'+srcBadge+'</td><td>'+fmtTime(new Date(s.started_at).toISOString())+'</td><td>'+dur+'</td><td>'+s.request_count+'</td><td>'+(s.total_tokens_in||0)+'</td><td>'+(s.total_tokens_out||0)+'</td><td>$'+fmt(s.total_cost_usd,4)+'</td><td>'+mix+'</td><td>'+badge+'</td></tr>';
+    }).join(''):'<tr><td colspan=10 style="color:#64748b">No sessions recorded yet</td></tr>';
+    const totalCost=sessions.reduce((s,r)=>s+(r.total_cost_usd||0),0);
+  }catch(e){console.error('sessions load error',e)}
+}
 async function load(){
   try{
     const [health,stats,runsR,sav,provH,agentsR]=await Promise.all([
@@ -3214,7 +3281,6 @@ async function load(){
     ).join('')||'<tr><td colspan=5 style="color:#64748b">No data yet</td></tr>';
     function ttCls(t){const m={code_generation:'tt-code',analysis:'tt-analysis',summarization:'tt-summarization',question_answering:'tt-qa'};return m[t]||'tt-general'}
     function cxCls(c){const m={simple:'cx-simple',moderate:'cx-moderate',complex:'cx-complex'};return m[c]||'cx-simple'}
-    function esc(s){if(!s)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
     const agents=(agentsR.agents||[]).sort((a,b)=>(b.totalCost||0)-(a.totalCost||0));
     $('runs').innerHTML=(runsR.runs||[]).map((r,i)=>{
       function errBadge(r){if(r.status==='success')return '<span class="badge ok">success</span>';var cls='err';var label=r.error||'error';if(r.statusCode===401||r.statusCode===403||(r.error&&/auth/i.test(r.error)))cls='err-auth';else if(r.statusCode===429||(r.error&&/rate.?limit/i.test(r.error)))cls='err-rate';else if(r.error&&/timeout/i.test(r.error))cls='err-timeout';return '<span class="badge '+cls+'" title="'+esc(r.error||'')+' (HTTP '+( r.statusCode||'?')+')">'+(r.statusCode?r.statusCode+' ':'')+ (label.length>40?label.slice(0,40)+'…':label)+'</span>';}
@@ -3288,7 +3354,28 @@ async function loadLearning(){
     }
   }catch(e){console.error('learning load error',e)}
 }
-load();loadLearning();setInterval(load,5000);setInterval(loadLearning,30000);
+async function loadTokenPool(){
+  try{
+    const data=await fetch('/v1/token-pool/status').then(r=>r.json()).catch(()=>null);
+    const el=$('token-pool-panel');
+    if(!el)return;
+    if(!data||!data.accounts||data.accounts.length===0){
+      el.innerHTML='<div style="color:#64748b;font-size:.85rem">No accounts registered. Add accounts under <code style="background:#1e293b;padding:2px 6px;border-radius:4px">providers.anthropic.accounts[]</code> in ~/.relayplane/config.json for multi-account pooling.</div>';
+      return;
+    }
+    el.innerHTML='<table><thead><tr><th>Label</th><th>Source</th><th>Priority</th><th>Type</th><th>Req/min</th><th>RPM Limit</th><th>Status</th></tr></thead><tbody>'+
+      data.accounts.map(function(a){
+        const rl=a.rateLimitedUntil?'<span class="badge err">rate-limited until '+new Date(a.rateLimitedUntil).toLocaleTimeString()+'</span>':
+          a.available?'<span class="badge ok">available</span>':'<span class="badge err-rate">throttled</span>';
+        const type=a.isOat?'<span style="color:#60a5fa;font-size:.75rem">OAT/Max</span>':'<span style="color:#94a3b8;font-size:.75rem">API key</span>';
+        const src=a.source==='config'?'<span style="color:#34d399;font-size:.75rem">config</span>':'<span style="color:#64748b;font-size:.75rem">auto</span>';
+        const pct=a.knownRpmLimit>0?Math.round(a.requestsThisMinute/a.knownRpmLimit*100):0;
+        const bar='<div style="background:#1e293b;border-radius:4px;height:6px;width:80px;display:inline-block;vertical-align:middle"><div style="background:'+(pct>=90?'#ef4444':pct>=70?'#fbbf24':'#34d399')+';height:100%;border-radius:4px;width:'+Math.min(pct,100)+'%"></div></div>';
+        return '<tr><td>'+esc(a.label)+'</td><td>'+src+'</td><td>'+a.priority+'</td><td>'+type+'</td><td>'+a.requestsThisMinute+' '+bar+'</td><td>'+a.knownRpmLimit+' rpm</td><td>'+rl+'</td></tr>';
+      }).join('')+'</tbody></table>';
+  }catch(e){console.error('token pool load error',e)}
+}
+load();loadLearning();loadSessions();loadTokenPool();setInterval(load,5000);setInterval(loadLearning,30000);setInterval(loadSessions,10000);setInterval(loadTokenPool,10000);
 </script><footer style="text-align:center;padding:20px 0;color:#475569;font-size:.75rem;border-top:1px solid #1e293b;margin-top:20px">🔒 Request content stays on your machine. Never sent to cloud.</footer></body></html>`;
 }
 
@@ -3480,6 +3567,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
     flushAgentRegistry();
     meshHandle.stop();
     shutdownHistory();
+    TraceWriter.getInstance().shutdown();
     process.exit(0);
   };
   process.on('SIGINT', handleShutdown);
@@ -3487,6 +3575,15 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
 
   const configPath = getProxyConfigPath();
   let proxyConfig = await loadProxyConfig(configPath, log);
+
+  // ── Deterministic Traces: initialise TraceWriter with loaded config ──
+  TraceWriter.getInstance({
+    ...(defaultTracesConfig()),
+    ...(proxyConfig.traces ?? {}),
+  });
+
+  // ── Tool Router: initialise deny-by-default tool authorization ──
+  getToolRouter();
 
   // Auto-config on startup: detect available auth and set optimal routing.
   //
@@ -3593,6 +3690,21 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
   _activeProxyConfig = proxyConfig;
   _activeOllamaConfig = proxyConfig.ollama;
   const cooldownManager = new CooldownManager(getCooldownConfig(proxyConfig));
+
+  // === Token pool: register explicit config accounts ===
+  {
+    const userCfg = loadUserConfig();
+    const anthropicAccounts = userCfg.providers?.['anthropic']?.accounts;
+    if (anthropicAccounts && anthropicAccounts.length > 0) {
+      const poolAccounts: PoolAccountConfig[] = anthropicAccounts.map((a) => ({
+        label: a.label,
+        apiKey: a.apiKey,
+        priority: a.priority ?? 0,
+      }));
+      getTokenPool().registerConfigAccounts(poolAccounts);
+      console.log(`[RelayPlane] Token pool: ${anthropicAccounts.length} configured account(s) registered`);
+    }
+  }
 
   // === Ollama provider initialization ===
   if (_activeOllamaConfig?.enabled !== false && _activeOllamaConfig?.models?.length) {
@@ -3906,6 +4018,12 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
 
     // === Control endpoints ===
     if (pathname.startsWith('/control/')) {
+      const remoteAddr = req.socket.remoteAddress;
+      if (remoteAddr !== '127.0.0.1' && remoteAddr !== '::1' && remoteAddr !== '::ffff:127.0.0.1') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Control endpoints are localhost-only' }));
+        return;
+      }
       if (req.method === 'POST' && pathname === '/control/enable') {
         proxyConfig = normalizeProxyConfig({ ...proxyConfig, enabled: true });
         await saveProxyConfig(configPath, proxyConfig);
@@ -3970,6 +4088,230 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           startConfigWatcher();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, config: proxyConfig }));
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        }
+        return;
+      }
+
+      // === Budget endpoints ===
+
+      if (req.method === 'GET' && pathname === '/control/budget') {
+        const status = budgetManager.getStatus();
+        const cfg = budgetManager.getConfig();
+        const now = Date.now();
+        const weekCutoff = now - 7 * 86400000;
+        const monthCutoff = now - 30 * 86400000;
+        const weekCost = requestHistory
+          .filter(r => new Date(r.timestamp).getTime() >= weekCutoff)
+          .reduce((s, r) => s + r.costUsd, 0);
+        const monthCost = requestHistory
+          .filter(r => new Date(r.timestamp).getTime() >= monthCutoff)
+          .reduce((s, r) => s + r.costUsd, 0);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          today_usd: Math.round(status.dailySpend * 10000) / 10000,
+          limit_usd: status.dailyLimit,
+          pct_used: Math.round(status.dailyPercent * 10) / 10,
+          remaining_usd: Math.max(0, Math.round((status.dailyLimit - status.dailySpend) * 10000) / 10000),
+          this_week_usd: Math.round(weekCost * 10000) / 10000,
+          this_month_usd: Math.round(monthCost * 10000) / 10000,
+          enabled: cfg.enabled,
+          on_breach: cfg.onBreach,
+          alert_thresholds: cfg.alertThresholds,
+          hourly_usd: Math.round(status.hourlySpend * 10000) / 10000,
+          hourly_limit_usd: status.hourlyLimit,
+          hourly_pct_used: Math.round(status.hourlyPercent * 10) / 10,
+          breached: status.breached,
+          breach_type: status.breachType,
+        }));
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/control/budget/set') {
+        try {
+          const body = await readJsonBody(req) as { dailyUsd?: number };
+          const amount = Number(body.dailyUsd);
+          if (!body.dailyUsd || isNaN(amount) || amount <= 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'dailyUsd must be a positive number' }));
+            return;
+          }
+          budgetManager.setLimits({ dailyUsd: amount });
+          budgetManager.updateConfig({ enabled: true });
+          proxyConfig = normalizeProxyConfig({
+            ...proxyConfig,
+            budget: { ...proxyConfig.budget, dailyUsd: amount, enabled: true },
+          });
+          await saveProxyConfig(configPath, proxyConfig);
+          startConfigWatcher();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, dailyUsd: amount }));
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        }
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/control/budget/set-alert') {
+        try {
+          const body = await readJsonBody(req) as { threshold?: number };
+          const pct = Number(body.threshold);
+          if (!body.threshold || isNaN(pct) || pct <= 0 || pct > 100) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'threshold must be 1-100' }));
+            return;
+          }
+          const current = budgetManager.getConfig();
+          const thresholds = [...new Set([...current.alertThresholds, pct])].sort((a, b) => a - b);
+          budgetManager.updateConfig({ alertThresholds: thresholds });
+          proxyConfig = normalizeProxyConfig({
+            ...proxyConfig,
+            budget: { ...proxyConfig.budget, alertThresholds: thresholds },
+          });
+          await saveProxyConfig(configPath, proxyConfig);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, alertThresholds: thresholds }));
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        }
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/control/budget/reset') {
+        budgetManager.reset();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, message: 'Daily spend counter reset' }));
+        return;
+      }
+
+      // === Session Budget endpoints ===
+
+      if (req.method === 'GET' && pathname === '/control/session-budget') {
+        const sbQs = url.includes('?') ? url.split('?')[1] ?? '' : '';
+        const sbParams = new URLSearchParams(sbQs);
+        const sessionId = sbParams.get('sessionId');
+        if (!sessionId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'sessionId query parameter required' }));
+          return;
+        }
+        const record = budgetManager.getSessionBudget(sessionId);
+        if (!record) {
+          const cap = budgetManager.getConfig().sessionCapUsd;
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            sessionId,
+            capUsd: cap,
+            spentUsd: 0,
+            remainingUsd: cap,
+            pctUsed: 0,
+            modelUsed: '',
+            status: 'ok',
+          }));
+          return;
+        }
+        const remaining = Math.max(0, record.capUsd - record.spentUsd);
+        const pctUsed = record.capUsd > 0 ? (record.spentUsd / record.capUsd) * 100 : 0;
+        const status = pctUsed >= 100 ? 'exceeded' : pctUsed >= 80 ? 'warning' : 'ok';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          sessionId: record.sessionId,
+          capUsd: record.capUsd,
+          spentUsd: record.spentUsd,
+          remainingUsd: remaining,
+          pctUsed: Math.round(pctUsed * 10) / 10,
+          modelUsed: record.modelUsed,
+          createdAt: new Date(record.createdAt).toISOString(),
+          updatedAt: new Date(record.updatedAt).toISOString(),
+          status,
+        }));
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/control/session-budget/set') {
+        try {
+          const body = await readJsonBody(req) as { sessionId?: string; capUsd?: number };
+          if (!body.sessionId || typeof body.capUsd !== 'number' || !isFinite(body.capUsd) || body.capUsd <= 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'sessionId (string) and capUsd (positive number) required' }));
+            return;
+          }
+          budgetManager.setSessionCap(body.sessionId, body.capUsd);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, sessionId: body.sessionId, capUsd: body.capUsd }));
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        }
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/control/session-budgets') {
+        const slQs = url.includes('?') ? url.split('?')[1] ?? '' : '';
+        const slParams = new URLSearchParams(slQs);
+        const limitParam = slParams.get('limit');
+        const limit = limitParam ? Math.min(50, Math.max(1, parseInt(limitParam, 10) || 50)) : 50;
+        const records = budgetManager.listSessionBudgets(limit);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          sessions: records.map(r => ({
+            sessionId: r.sessionId,
+            capUsd: r.capUsd,
+            spentUsd: r.spentUsd,
+            remainingUsd: Math.max(0, r.capUsd - r.spentUsd),
+            pctUsed: r.capUsd > 0 ? Math.round((r.spentUsd / r.capUsd) * 1000) / 10 : 0,
+            modelUsed: r.modelUsed,
+            createdAt: new Date(r.createdAt).toISOString(),
+            updatedAt: new Date(r.updatedAt).toISOString(),
+            status: r.spentUsd >= r.capUsd ? 'exceeded' : (r.spentUsd / r.capUsd) >= 0.8 ? 'warning' : 'ok',
+          })),
+          count: records.length,
+        }));
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/control/model') {
+        try {
+          const body = await readJsonBody(req) as { model?: string; reason?: string };
+          if (!body.model) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'model required' }));
+            return;
+          }
+          if (body.model.length > 128 || !/^[a-zA-Z0-9._:/-]+$/.test(body.model)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'model must be ≤128 characters and contain only [a-zA-Z0-9._:/-]' }));
+            return;
+          }
+          const previousRouting = proxyConfig.routing;
+          const target = body.model;
+          // Update all complexity tiers to the requested model
+          proxyConfig = normalizeProxyConfig({
+            ...proxyConfig,
+            routing: {
+              ...proxyConfig.routing,
+              complexity: {
+                enabled: proxyConfig.routing?.complexity?.enabled ?? true,
+                simple: target,
+                moderate: target,
+                complex: target,
+              },
+            },
+          });
+          await saveProxyConfig(configPath, proxyConfig);
+          startConfigWatcher();
+          const prevModel = previousRouting?.complexity?.complex ?? previousRouting?.complexity?.moderate ?? 'unknown';
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            switched: true,
+            previous: prevModel,
+            current: target,
+            reason: body.reason ?? '',
+          }));
         } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid JSON' }));
@@ -4312,6 +4654,13 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
       return;
     }
 
+    // === Token pool status endpoint ===
+    if (req.method === 'GET' && pathname === '/v1/token-pool/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(getTokenPool().getStatus()));
+      return;
+    }
+
     // === Mesh stats endpoint ===
     // === Ollama status endpoint ===
     if (req.method === 'GET' && pathname === '/v1/ollama/status') {
@@ -4372,6 +4721,249 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
       return;
     }
 
+    // === Session Intelligence endpoints ===
+    if (req.method === 'GET' && (pathname === '/v1/sessions' || pathname === '/v1/sessions/active')) {
+      const remoteAddr = req.socket.remoteAddress;
+      if (remoteAddr !== '127.0.0.1' && remoteAddr !== '::1' && remoteAddr !== '::ffff:127.0.0.1') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Session endpoints are localhost-only' }));
+        return;
+      }
+    }
+
+    if (req.method === 'GET' && pathname === '/v1/sessions') {
+      const queryString = url.includes('?') ? url.split('?')[1] ?? '' : '';
+      const params = new URLSearchParams(queryString);
+      const rawLimit = parseInt(params.get('limit') || '20', 10);
+      const rawDays = parseInt(params.get('days') || '7', 10);
+      const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 20, 100);
+      const days = Number.isFinite(rawDays) && rawDays > 0 ? rawDays : 7;
+      const sessions = getSessions({ limit, days });
+      const now = Date.now();
+      const activeCutoff = now - 5 * 60 * 1000;
+      // Build model_mix per session from episodic_events in osmosis.db
+      const modelMixMap = new Map<string, Record<string, number>>();
+      try {
+        const osmDb = getOsmosisDb();
+        if (osmDb && sessions.length > 0) {
+          const placeholders = sessions.map(() => '?').join(',');
+          const sessionIds = sessions.map(s => s.id);
+          const rows = osmDb.prepare(
+            `SELECT session_id, model_used, COUNT(*) as cnt
+             FROM episodic_events
+             WHERE session_id IN (${placeholders})
+             GROUP BY session_id, model_used`
+          ).all(...sessionIds) as { session_id: string; model_used: string; cnt: number }[];
+          for (const row of rows) {
+            if (!modelMixMap.has(row.session_id)) modelMixMap.set(row.session_id, {});
+            modelMixMap.get(row.session_id)![row.model_used] = row.cnt;
+          }
+        }
+      } catch { /* best-effort */ }
+      const result = sessions.map(s => ({
+        ...s,
+        active: s.last_seen_at >= activeCutoff,
+        duration_ms: s.last_seen_at - s.started_at,
+        model_mix: modelMixMap.get(s.id) ?? {},
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ sessions: result, total: result.length }));
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/v1/sessions/active') {
+      const active = getActiveSessions();
+      const now = Date.now();
+      const result = active.map(s => ({
+        ...s,
+        active: true,
+        duration_ms: s.last_seen_at - s.started_at,
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ sessions: result, total: result.length }));
+      return;
+    }
+
+    // === Trace endpoints (CAP 3) ===
+    if ((req.method === 'GET' || req.method === 'POST') && (pathname === '/v1/traces' || (pathname ?? '').startsWith('/v1/traces/'))) {
+      const remoteAddr = req.socket.remoteAddress;
+      if (remoteAddr !== '127.0.0.1' && remoteAddr !== '::1' && remoteAddr !== '::ffff:127.0.0.1') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Trace endpoints are localhost-only' }));
+        return;
+      }
+    }
+
+    if (req.method === 'GET' && pathname === '/v1/traces') {
+      const queryString = url.includes('?') ? url.split('?')[1] ?? '' : '';
+      const params = new URLSearchParams(queryString);
+      const limit = Math.min(parseInt(params.get('limit') ?? '20', 10) || 20, 100);
+      const traceWriter = TraceWriter.getInstance();
+      const traces = traceWriter.getRecentTraces(limit);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ traces, total: traces.length }));
+      return;
+    }
+
+    if (req.method === 'GET' && (pathname ?? '').match(/^\/v1\/traces\/([^/]+)\/graph$/)) {
+      const sessionId = (pathname ?? '').split('/')[3] ?? '';
+      const traceWriter = TraceWriter.getInstance();
+      const graph = traceWriter.getSessionGraph(sessionId);
+      if (!graph) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `No graph found for session: ${sessionId}` }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(graph));
+      return;
+    }
+
+    if (req.method === 'GET' && (pathname ?? '').match(/^\/v1\/traces\/([^/]+)\/events$/)) {
+      const traceId = (pathname ?? '').split('/')[3] ?? '';
+      const tw = TraceWriter.getInstance();
+      const events = tw.getTraceEvents(traceId);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ traceId, events, total: events.length }));
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/v1/traces/export') {
+      try {
+        const exportOptions = await readJsonBody(req) as {
+          format?: string;
+          sessionIds?: string[];
+          fromTimestamp?: number;
+          toTimestamp?: number;
+          includeToolInputs?: boolean;
+        };
+        const format = exportOptions.format ?? 'jsonl';
+        if (!['jsonl', 'csv', 'markdown', 'traceops'].includes(format)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'format must be one of: jsonl, csv, markdown, traceops' }));
+          return;
+        }
+        const tw = TraceWriter.getInstance();
+        const exported = await tw.export({
+          format: format as 'jsonl' | 'csv' | 'markdown' | 'traceops',
+          sessionIds: exportOptions.sessionIds,
+          fromTimestamp: exportOptions.fromTimestamp,
+          toTimestamp: exportOptions.toTimestamp,
+          includeToolInputs: exportOptions.includeToolInputs,
+        });
+        const contentType = format === 'markdown' ? 'text/markdown' : 'application/x-ndjson';
+        res.writeHead(200, { 'Content-Type': contentType });
+        res.end(exported);
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+      }
+      return;
+    }
+
+    // === Memory endpoints (Session 4 — localhost-only) ===
+    if ((pathname ?? '').startsWith('/v1/memory')) {
+      const remoteAddr = req.socket.remoteAddress;
+      if (remoteAddr !== '127.0.0.1' && remoteAddr !== '::1' && remoteAddr !== '::ffff:127.0.0.1') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Memory endpoints are localhost-only' }));
+        return;
+      }
+    }
+
+    if (req.method === 'GET' && pathname === '/v1/memory/semantic') {
+      const queryString = url.includes('?') ? url.split('?')[1] ?? '' : '';
+      const params = new URLSearchParams(queryString);
+      const sessionId = params.get('session_id') ?? undefined;
+      const limit = Math.min(parseInt(params.get('limit') ?? '20', 10) || 20, 100);
+      try {
+        const db = getOsmosisDb();
+        if (!db) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ atoms: [], total: 0 }));
+          return;
+        }
+        let atoms: unknown[];
+        if (sessionId) {
+          atoms = db.prepare(
+            `SELECT id, type, model, task_type, latency_ms, input_tokens, output_tokens, confidence, observation_count, timestamp, session_id
+             FROM knowledge_atoms WHERE session_id = ? ORDER BY confidence DESC, timestamp DESC LIMIT ?`
+          ).all(sessionId, limit);
+        } else {
+          atoms = db.prepare(
+            `SELECT id, type, model, task_type, latency_ms, input_tokens, output_tokens, confidence, observation_count, timestamp, session_id
+             FROM knowledge_atoms ORDER BY confidence DESC, timestamp DESC LIMIT ?`
+          ).all(limit);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ atoms, total: atoms.length }));
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Memory query failed' }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/v1/memory/episodic') {
+      const queryString = url.includes('?') ? url.split('?')[1] ?? '' : '';
+      const params = new URLSearchParams(queryString);
+      const sessionId = params.get('session_id') ?? undefined;
+      const limit = Math.min(parseInt(params.get('limit') ?? '50', 10) || 50, 200);
+      try {
+        const db = getOsmosisDb();
+        if (!db) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ events: [], total: 0 }));
+          return;
+        }
+        let events: unknown[];
+        if (sessionId) {
+          events = db.prepare(
+            `SELECT id, session_id, event_type, timestamp, duration_ms, model_used, tokens_in, tokens_out, cost_usd, outcome, outcome_detail, trace_id
+             FROM episodic_events WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?`
+          ).all(sessionId, limit);
+        } else {
+          events = db.prepare(
+            `SELECT id, session_id, event_type, timestamp, duration_ms, model_used, tokens_in, tokens_out, cost_usd, outcome, outcome_detail, trace_id
+             FROM episodic_events ORDER BY timestamp DESC LIMIT ?`
+          ).all(limit);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ events, total: events.length }));
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Memory query failed' }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/v1/memory/procedural') {
+      const queryString = url.includes('?') ? url.split('?')[1] ?? '' : '';
+      const params = new URLSearchParams(queryString);
+      const limit = Math.min(parseInt(params.get('limit') ?? '10', 10) || 10, 50);
+      try {
+        // Read from mesh.db (procedural atom store)
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const Database = require('better-sqlite3') as typeof import('better-sqlite3');
+        const meshDbPath = require('node:path').join(getRelayplaneDir(), 'mesh.db');
+        let atoms: unknown[] = [];
+        try {
+          const meshDb = new Database(meshDbPath, { readonly: true });
+          atoms = meshDb.prepare(
+            `SELECT id, type, observation, confidence, fitness_score, trust_tier, evidence_count, created_at, updated_at
+             FROM atoms ORDER BY fitness_score DESC, confidence DESC LIMIT ?`
+          ).all(limit);
+          meshDb.close();
+        } catch { /* mesh.db may not exist yet */ }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ atoms, total: atoms.length }));
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Procedural memory query failed' }));
+      }
+      return;
+    }
+
     // Extract auth context from incoming request
     const ctx = extractRequestContext(req);
     const anthropicEnvKey = process.env['ANTHROPIC_API_KEY'];
@@ -4380,9 +4972,31 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
     const relayplaneEnabled = proxyConfig.enabled !== false;
     const recordTelemetry = relayplaneEnabled && !relayplaneBypass;
 
-    // Determine which Anthropic auth to use based on mode
+    // === Token pool: auto-detect incoming token ===
+    {
+      const incomingToken = ctx.authHeader
+        ? ctx.authHeader.replace(/^Bearer\s+/i, '')
+        : ctx.apiKeyHeader;
+      if (incomingToken) {
+        getTokenPool().autoDetect(incomingToken);
+      }
+    }
+
+    // Determine which Anthropic auth to use based on mode.
+    // When the token pool has registered accounts, select the best token from
+    // the pool and use it as the effective key (overrides env and passthrough).
     let useAnthropicEnvKey: string | undefined;
-    if (anthropicAuthMode === 'env') {
+    let _poolSelectedToken: string | undefined; // tracks the token chosen from the pool for this request
+    if (getTokenPool().size() > 0) {
+      const poolToken = getTokenPool().selectToken();
+      if (poolToken) {
+        _poolSelectedToken = poolToken.apiKey;
+        useAnthropicEnvKey = poolToken.apiKey;
+      } else {
+        // All tokens exhausted — fall back to normal resolution
+        useAnthropicEnvKey = anthropicAuthMode === 'passthrough' ? undefined : anthropicEnvKey;
+      }
+    } else if (anthropicAuthMode === 'env') {
       useAnthropicEnvKey = anthropicEnvKey;
     } else if (anthropicAuthMode === 'passthrough') {
       useAnthropicEnvKey = undefined; // Only use incoming auth
@@ -4413,6 +5027,12 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
         return;
       }
 
+      // Extract session ID (X-Claude-Code-Session-Id or synthetic)
+      const { sessionId: nativeSessionId, sessionSource: nativeSessionSource } = getSessionId(
+        req,
+        requestBody['model'] as string | undefined,
+      );
+
       // Extract agent fingerprint and explicit agent ID
       const nativeSystemPrompt = extractSystemPromptFromBody(requestBody);
       const nativeExplicitAgentId = getHeaderValue(req, 'x-relayplane-agent') || undefined;
@@ -4431,6 +5051,30 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
       const parsedModel = parseModelSuffix(requestedModel);
       let routingSuffix = parsedModel.suffix;
       requestedModel = parsedModel.baseModel;
+
+      // ── CAP 3: Deterministic Traces — allocate traceId + emit request.start ──
+      const nativeTraceId = randomUUID();
+      {
+        const tw = TraceWriter.getInstance();
+        if (tw.isEnabled() && recordTelemetry) {
+          const sysHash = nativeSystemPrompt ? sha256Hex(nativeSystemPrompt) : undefined;
+          const messages = requestBody['messages'] as unknown[] | undefined;
+          const reqTools = Array.isArray(requestBody['tools'])
+            ? (requestBody['tools'] as { name?: string }[]).map(t => t?.name ?? '').filter(Boolean)
+            : undefined;
+          void tw.write(nativeSessionId, nativeTraceId, {
+            eventType: 'request.start',
+            parentTraceId: getHeaderValue(req, 'x-parent-trace-id') || undefined,
+            agentId: getHeaderValue(req, 'x-agent-id') || nativeExplicitAgentId || undefined,
+            payload: {
+              model: requestedModel,
+              messageCount: messages?.length,
+              requestedTools: reqTools,
+              systemPromptHash: sysHash,
+            },
+          });
+        }
+      }
 
       if (relayplaneEnabled && !relayplaneBypass && requestedModel) {
         const override = proxyConfig.modelOverrides?.[requestedModel];
@@ -4694,6 +5338,118 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
       }
       // ── End budget check ──
 
+      // ── Session budget check (only when X-Claude-Code-Session-Id is present) ──
+      let nativeSessionBudgetResult: SessionBudgetCheckResult | null = null;
+      if (nativeSessionSource === 'claude-code') {
+        nativeSessionBudgetResult = budgetManager.checkSessionBudget(nativeSessionId, targetModel || requestedModel);
+        if (!nativeSessionBudgetResult.allowed) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'session_budget_exceeded',
+            spent: nativeSessionBudgetResult.spent,
+            cap: nativeSessionBudgetResult.cap,
+            type: 'session_budget_exceeded',
+          }));
+          return;
+        }
+        if (nativeSessionBudgetResult.model !== (targetModel || requestedModel)) {
+          log(`Session budget downgrade: ${targetModel || requestedModel} → ${nativeSessionBudgetResult.model}`);
+          // CAP 3: emit model.switch before we overwrite targetModel
+          {
+            const tw = TraceWriter.getInstance();
+            if (tw.isEnabled() && recordTelemetry) {
+              void tw.write(nativeSessionId, nativeTraceId, {
+                eventType: 'model.switch',
+                payload: {
+                  fromModel: targetModel || requestedModel,
+                  toModel: nativeSessionBudgetResult.model,
+                  switchReason: 'session_budget',
+                },
+              });
+            }
+          }
+          targetModel = nativeSessionBudgetResult.model;
+          if (requestBody) requestBody['model'] = targetModel;
+        }
+        // CAP 3: emit budget.checkpoint after every budget check
+        {
+          const tw = TraceWriter.getInstance();
+          if (tw.isEnabled() && recordTelemetry) {
+            void tw.write(nativeSessionId, nativeTraceId, {
+              eventType: 'budget.checkpoint',
+              payload: {
+                sessionCostUsd: nativeSessionBudgetResult.spent,
+                sessionCapUsd: nativeSessionBudgetResult.cap,
+                sessionPct:
+                  nativeSessionBudgetResult.cap > 0
+                    ? nativeSessionBudgetResult.spent / nativeSessionBudgetResult.cap
+                    : 0,
+              },
+            });
+          }
+        }
+      }
+      // ── End session budget check ──
+
+      // ── Tool authorization check (deny-by-default, after budget gate) ──
+      {
+        const reqTools = Array.isArray(requestBody?.['tools'])
+          ? (requestBody['tools'] as { name?: string }[]).map(t => t?.name ?? '').filter(Boolean)
+          : [];
+        if (reqTools.length > 0) {
+          const tr = getToolRouter();
+          const toolCtx = extractToolContext(
+            req.headers as Record<string, string | string[] | undefined>,
+            nativeSessionId,
+            reqTools,
+            tr,
+          );
+          const authResult = tr.checkTools(toolCtx);
+          if (authResult.denied.length > 0) {
+            for (const toolName of authResult.denied) {
+              tr.recordDenied(nativeSessionId, toolName, 'not_in_active_pack');
+            }
+            // Emit tool.denied trace event
+            const tw = TraceWriter.getInstance();
+            if (tw.isEnabled() && recordTelemetry) {
+              for (const toolName of authResult.denied) {
+                void tw.write(nativeSessionId, nativeTraceId, {
+                  eventType: 'tool.denied',
+                  payload: { toolName },
+                });
+              }
+            }
+            // If ALL requested tools are denied, block the request
+            if (authResult.allowed.length === 0) {
+              res.writeHead(403, {
+                'Content-Type': 'application/json',
+                'X-Relay-Tools-Denied': authResult.deniedHeader,
+              });
+              res.end(JSON.stringify({
+                error: 'tool_not_authorized',
+                denied: authResult.denied,
+                message: 'All requested tools are denied by the active tool pack policy.',
+              }));
+              return;
+            }
+          }
+          // Strip denied tools from the forwarded request body so the model
+          // cannot call them even when only a partial set of tools was denied.
+          if (Array.isArray(requestBody['tools'])) {
+            const allowedSet = new Set(authResult.allowed);
+            requestBody['tools'] = (requestBody['tools'] as { name?: string }[]).filter(
+              t => allowedSet.has(t?.name ?? ''),
+            );
+          }
+          // Set response header so callers know which tools were denied
+          if (authResult.deniedHeader) {
+            // Stash for later use when writing response headers
+            budgetExtraHeaders['X-Relay-Tools-Denied'] = authResult.deniedHeader;
+          }
+        }
+      }
+      // ── End tool authorization check ──
+
       // ── Rate limit check ──
       const workspaceId = 'local'; // Local proxy uses single workspace
       try {
@@ -4780,13 +5536,50 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           if (isRerouted) {
             log(`Rerouted: ${originalModel} → ${finalModel} (auth fallback enabled)`);
           }
-          const providerResponse = await forwardNativeAnthropicRequest(
+          // Build pool-aware context: when the pool is managing auth, clear incoming
+          // auth headers so buildAnthropicHeadersWithAuth uses the pool token instead.
+          const _nativeReqCtx: RequestContext = _poolSelectedToken
+            ? { ...ctx, authHeader: undefined, apiKeyHeader: undefined }
+            : ctx;
+
+          let providerResponse = await forwardNativeAnthropicRequest(
             { ...requestBody, model: finalModel },
-            ctx,
+            _nativeReqCtx,
             modelAuth.apiKey,
             modelAuth.isMax,
             isRerouted
           );
+
+          // Token pool: on 429, record and retry with next available token
+          if (providerResponse.status === 429 && _poolSelectedToken) {
+            const _poolRetryAfterHeader = providerResponse.headers.get('retry-after');
+            const _poolRetryAfterS = _poolRetryAfterHeader ? parseInt(_poolRetryAfterHeader, 10) : undefined;
+            getTokenPool().record429(
+              _poolSelectedToken,
+              _poolRetryAfterS !== undefined && !isNaN(_poolRetryAfterS) ? _poolRetryAfterS : undefined,
+            );
+            const _nextPoolToken = getTokenPool().selectToken();
+            if (_nextPoolToken) {
+              log(`[TokenPool] 429 on token …${_poolSelectedToken.slice(-8)} — retrying with "${_nextPoolToken.label}"`);
+              _poolSelectedToken = _nextPoolToken.apiKey;
+              const _retryCtx: RequestContext = { ...ctx, authHeader: undefined, apiKeyHeader: undefined };
+              providerResponse = await forwardNativeAnthropicRequest(
+                { ...requestBody, model: finalModel },
+                _retryCtx,
+                _nextPoolToken.apiKey,
+                _nextPoolToken.isOat,
+                isRerouted
+              );
+            }
+          }
+
+          // Token pool: learn rate limits from upstream response headers
+          if (_poolSelectedToken && providerResponse.ok) {
+            const _upstreamHeaders: Record<string, string | undefined> = {};
+            providerResponse.headers.forEach((v, k) => { _upstreamHeaders[k] = v; });
+            getTokenPool().recordResponseHeaders(_poolSelectedToken, _upstreamHeaders);
+          }
+
           if (!providerResponse.ok) {
             const errorPayload = (await providerResponse.json()) as Record<string, unknown>;
             if (proxyConfig.reliability?.cooldowns?.enabled) {
@@ -4870,7 +5663,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
               routingMode,
               undefined,
               taskType, complexity,
-              undefined, undefined,
+              nativeAgentFingerprint, nativeExplicitAgentId,
               errMsg, providerResponse.status
             );
             res.writeHead(providerResponse.status, { 'Content-Type': 'application/json' });
@@ -4890,6 +5683,8 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
               'Cache-Control': 'no-cache',
               'Connection': 'keep-alive',
               'X-RelayPlane-Cache': cacheBypass ? 'BYPASS' : 'MISS',
+              'X-Relay-Trace-Id': nativeTraceId,
+              'X-Relay-Memory-Hits': String(countAtomsForSession(nativeSessionId)),
               ...nativeStreamRpHeaders,
             });
             const reader = providerResponse.body?.getReader();
@@ -4981,7 +5776,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
               });
               log(`Cache STORE for ${targetModel || requestedModel} (hash: ${cacheHash.slice(0, 8)})`);
             }
-            res.writeHead(providerResponse.status, { 'Content-Type': 'application/json', 'X-RelayPlane-Cache': nativeCacheHeader, ...nativeRpHeaders });
+            res.writeHead(providerResponse.status, { 'Content-Type': 'application/json', 'X-RelayPlane-Cache': nativeCacheHeader, 'X-Relay-Trace-Id': nativeTraceId, 'X-Relay-Memory-Hits': String(countAtomsForSession(nativeSessionId)), ...nativeRpHeaders });
             res.end(JSON.stringify(nativeResponseData));
           }
         }
@@ -5038,6 +5833,54 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           updateAgentCost(nativeAgentFingerprint, nativeCostUsd);
         }
 
+        // ── Session Intelligence: upsert session record ──
+        upsertSession(nativeSessionId, nativeSessionSource, nativeCostUsd, nativeTokIn, nativeTokOut);
+
+        // ── Session 4: Episodic memory write (fire-and-forget) ──
+        try {
+          writeEpisode(nativeSessionId, {
+            eventType: 'model-response',
+            modelUsed: targetModel || requestedModel,
+            tokensIn: nativeTokIn,
+            tokensOut: nativeTokOut,
+            costUsd: nativeCostUsd,
+            outcome: 'success',
+            traceId: nativeTraceId,
+            durationMs,
+          });
+        } catch { /* never block hot path */ }
+
+        // ── CAP 3: Deterministic Traces — emit request.end + finalize ──
+        {
+          const tw = TraceWriter.getInstance();
+          if (tw.isEnabled() && recordTelemetry) {
+            const finishReason =
+              (nativeResponseData as Record<string, unknown> | undefined)?.['stop_reason'] as string | undefined
+              ?? (((nativeResponseData as Record<string, unknown> | undefined)?.['choices'] as Record<string, unknown>[] | undefined)?.[0]?.['finish_reason']) as string | undefined;
+            void tw.write(nativeSessionId, nativeTraceId, {
+              eventType: 'request.end',
+              durationMs,
+              payload: {
+                modelUsed: targetModel || requestedModel,
+                tokensIn: nativeTokIn,
+                tokensOut: nativeTokOut,
+                costUsd: nativeCostUsd,
+                finishReason,
+              },
+            });
+            void tw.finalizeTrace(nativeTraceId, nativeSessionId, {
+              costUsd: nativeCostUsd,
+              modelUsed: targetModel || requestedModel,
+              durationMs,
+            });
+          }
+        }
+
+        // ── Session budget: record spend (fire-and-forget, only for claude-code sessions) ──
+        if (nativeSessionSource === 'claude-code') {
+          budgetManager.updateSessionBudget(nativeSessionId, nativeCostUsd, targetModel || requestedModel);
+        }
+
         // ── Post-request: budget spend + anomaly detection ──
         postRequestRecord(targetModel || requestedModel, nativeTokIn, nativeTokOut, nativeCostUsd);
 
@@ -5076,9 +5919,22 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           routingMode,
           undefined,
           taskType, complexity,
-          undefined, undefined,
+          nativeAgentFingerprint, nativeExplicitAgentId,
           catchErrMsg, catchErrStatus
         );
+        // ── CAP 3: Deterministic Traces — emit request.end (error) + finalize ──
+        {
+          const tw = TraceWriter.getInstance();
+          if (tw.isEnabled() && recordTelemetry) {
+            void tw.write(nativeSessionId, nativeTraceId, {
+              eventType: 'request.end',
+              durationMs,
+              error: { code: String(catchErrStatus), message: catchErrMsg, retryable: catchErrStatus >= 500 },
+              payload: { modelUsed: targetModel || requestedModel },
+            });
+            void tw.finalizeTrace(nativeTraceId, nativeSessionId, { durationMs, modelUsed: targetModel || requestedModel });
+          }
+        }
         if (recordTelemetry) {
           sendCloudTelemetry(taskType, targetModel || requestedModel, 0, 0, durationMs, false, 0, originalModel ?? undefined);
           meshCapture(targetModel || requestedModel, targetProvider, taskType, 0, 0, 0, durationMs, false, catchErrMsg);
@@ -5206,6 +6062,12 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
 
     const isStreaming = request.stream === true;
 
+    // Extract session ID for chat/completions
+    const { sessionId: chatSessionId, sessionSource: chatSessionSource } = getSessionId(
+      req,
+      request.model,
+    );
+
     // Extract agent fingerprint for chat/completions
     const chatSystemPrompt = extractSystemPromptFromBody(request as unknown as Record<string, unknown>);
     const chatExplicitAgentId = getHeaderValue(req, 'x-relayplane-agent') || undefined;
@@ -5213,6 +6075,25 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
     if (chatSystemPrompt) {
       const agentResult = trackAgent(chatSystemPrompt, 0, chatExplicitAgentId);
       chatAgentFingerprint = agentResult.fingerprint;
+    }
+
+    // ── CAP 3: Deterministic Traces — allocate chatTraceId + emit request.start ──
+    const chatTraceId = randomUUID();
+    {
+      const tw = TraceWriter.getInstance();
+      if (tw.isEnabled() && recordTelemetry) {
+        const chatSysHash = chatSystemPrompt ? sha256Hex(chatSystemPrompt) : undefined;
+        void tw.write(chatSessionId, chatTraceId, {
+          eventType: 'request.start',
+          parentTraceId: getHeaderValue(req, 'x-parent-trace-id') || undefined,
+          agentId: getHeaderValue(req, 'x-agent-id') || chatExplicitAgentId || undefined,
+          payload: {
+            model: request.model,
+            messageCount: request.messages?.length,
+            systemPromptHash: chatSysHash,
+          },
+        });
+      }
     }
 
     // ── Response Cache: check for cached response (chat/completions) ──
@@ -5591,6 +6472,8 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
         chatCacheBypass,
         chatAgentFingerprint,
         chatExplicitAgentId,
+        chatSessionId,
+        chatSessionSource,
       );
     } else {
       if (useCascade && cascadeConfig) {
@@ -5653,6 +6536,44 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           const cascadeCost = estimateCost(cascadeResult.model, cascadeTokensIn, cascadeTokensOut, cascadeCacheCreation, cascadeCacheRead);
           updateLastHistoryEntry(cascadeTokensIn, cascadeTokensOut, cascadeCost, chatCascadeRespModel, cascadeCacheCreation, cascadeCacheRead, chatAgentFingerprint, chatExplicitAgentId);
           if (chatAgentFingerprint && chatAgentFingerprint !== 'unknown') updateAgentCost(chatAgentFingerprint, cascadeCost);
+          upsertSession(chatSessionId, chatSessionSource, cascadeCost, cascadeTokensIn, cascadeTokensOut);
+
+          // ── Session 4: Episodic memory write (fire-and-forget) ──
+          try {
+            writeEpisode(chatSessionId, {
+              eventType: 'routing-decision',
+              modelUsed: cascadeResult.model,
+              tokensIn: cascadeTokensIn,
+              tokensOut: cascadeTokensOut,
+              costUsd: cascadeCost,
+              outcome: 'success',
+              outcomeDetail: 'cascade',
+              traceId: chatTraceId,
+              durationMs,
+            });
+          } catch { /* never block hot path */ }
+
+          // ── CAP 3: Deterministic Traces — emit request.end + finalize (chat cascade) ──
+          {
+            const tw = TraceWriter.getInstance();
+            if (tw.isEnabled() && recordTelemetry) {
+              void tw.write(chatSessionId, chatTraceId, {
+                eventType: 'request.end',
+                durationMs,
+                payload: {
+                  modelUsed: cascadeResult.model,
+                  tokensIn: cascadeTokensIn,
+                  tokensOut: cascadeTokensOut,
+                  costUsd: cascadeCost,
+                },
+              });
+              void tw.finalizeTrace(chatTraceId, chatSessionId, {
+                costUsd: cascadeCost,
+                modelUsed: cascadeResult.model,
+                durationMs,
+              });
+            }
+          }
 
           if (recordTelemetry) {
             try {
@@ -5683,7 +6604,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           const chatCascadeRpHeaders = buildRelayPlaneResponseHeaders(
             cascadeResult.model, originalRequestedModel ?? 'unknown', complexity, cascadeResult.provider, 'cascade'
           );
-          res.writeHead(200, { 'Content-Type': 'application/json', ...chatCascadeRpHeaders });
+          res.writeHead(200, { 'Content-Type': 'application/json', 'X-Relay-Trace-Id': chatTraceId, 'X-Relay-Memory-Hits': String(countAtomsForSession(chatSessionId)), ...chatCascadeRpHeaders });
           res.end(JSON.stringify(responseData));
         } catch (err) {
           const durationMs = Date.now() - startTime;
@@ -5696,7 +6617,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
             cascadeErrMsg = err instanceof Error ? err.message : String(err);
             cascadeErrStatus = 500;
           }
-          logRequest(originalRequestedModel ?? 'unknown', targetModel || 'unknown', targetProvider, durationMs, false, 'cascade', undefined, taskType, complexity, undefined, undefined, cascadeErrMsg, cascadeErrStatus);
+          logRequest(originalRequestedModel ?? 'unknown', targetModel || 'unknown', targetProvider, durationMs, false, 'cascade', undefined, taskType, complexity, chatAgentFingerprint, chatExplicitAgentId, cascadeErrMsg, cascadeErrStatus);
           if (recordTelemetry) {
             sendCloudTelemetry(taskType, targetModel || 'unknown', 0, 0, durationMs, false, 0, originalRequestedModel ?? undefined);
             meshCapture(targetModel || 'unknown', targetProvider, taskType, 0, 0, 0, durationMs, false, cascadeErrMsg);
@@ -5711,6 +6632,8 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           res.end(JSON.stringify({ error: `Provider error: ${errorMsg}` }));
         }
       } else {
+        res.setHeader('X-Relay-Trace-Id', chatTraceId);
+        res.setHeader('X-Relay-Memory-Hits', String(countAtomsForSession(chatSessionId)));
         await handleNonStreamingRequest(
           res,
           request,
@@ -5732,6 +6655,9 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           chatAgentFingerprint,
           chatExplicitAgentId,
           useAnthropicEnvKey, // pass for cross-provider cascade API key resolution (GH #38)
+          chatSessionId,
+          chatSessionSource,
+          chatTraceId,
         );
       }
     }
@@ -5930,6 +6856,8 @@ async function handleStreamingRequest(
   cacheBypass?: boolean,
   agentFingerprint?: string,
   agentId?: string,
+  sessionId?: string,
+  sessionSource?: 'claude-code' | 'synthetic',
 ): Promise<void> {
   let providerResponse: Response;
 
@@ -5960,7 +6888,7 @@ async function handleStreamingRequest(
         if (!ollamaStream.success || !ollamaStream.stream) {
           const durationMs = Date.now() - startTime;
           const errMsg = ollamaStream.error?.message ?? 'Ollama stream failed';
-          logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, undefined, undefined, errMsg, ollamaStream.error?.status);
+          logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, agentFingerprint, agentId, errMsg, ollamaStream.error?.status);
           res.writeHead(ollamaStream.error?.status ?? 502, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: ollamaStream.error }));
           return;
@@ -5997,7 +6925,7 @@ async function handleStreamingRequest(
       }
       const durationMs = Date.now() - startTime;
       const streamErrMsg = extractProviderErrorMessage(errorData, providerResponse.status);
-      logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, undefined, undefined, streamErrMsg, providerResponse.status);
+      logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, agentFingerprint, agentId, streamErrMsg, providerResponse.status);
       if (recordTelemetry) {
         sendCloudTelemetry(taskType, targetModel, 0, 0, durationMs, false, 0, request.model ?? undefined);
         meshCapture(targetModel, targetProvider, taskType, 0, 0, 0, durationMs, false, streamErrMsg);
@@ -6012,7 +6940,7 @@ async function handleStreamingRequest(
       cooldownManager.recordFailure(targetProvider, errorMsg);
     }
     const durationMs = Date.now() - startTime;
-    logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, undefined, undefined, errorMsg, 500);
+    logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, agentFingerprint, agentId, errorMsg, 500);
     if (recordTelemetry) {
       sendCloudTelemetry(taskType, targetModel, 0, 0, durationMs, false, 0, request.model ?? undefined);
       meshCapture(targetModel, targetProvider, taskType, 0, 0, 0, durationMs, false, errorMsg);
@@ -6148,6 +7076,22 @@ async function handleStreamingRequest(
   const streamCost = estimateCost(targetModel, streamTokensIn, streamTokensOut, streamCacheCreation || undefined, streamCacheRead || undefined);
   updateLastHistoryEntry(streamTokensIn, streamTokensOut, streamCost, undefined, streamCacheCreation || undefined, streamCacheRead || undefined, agentFingerprint, agentId);
   if (agentFingerprint && agentFingerprint !== 'unknown') updateAgentCost(agentFingerprint, streamCost);
+  if (sessionId && sessionSource) upsertSession(sessionId, sessionSource, streamCost, streamTokensIn, streamTokensOut);
+
+  // ── Session 4: Episodic memory write (fire-and-forget) ──
+  if (sessionId) {
+    try {
+      writeEpisode(sessionId, {
+        eventType: 'model-response',
+        modelUsed: targetModel,
+        tokensIn: streamTokensIn,
+        tokensOut: streamTokensOut,
+        costUsd: streamCost,
+        outcome: 'success',
+        durationMs,
+      });
+    } catch { /* never block hot path */ }
+  }
 
   // ── Post-request: budget spend + anomaly detection ──
   try {
@@ -6208,6 +7152,10 @@ async function handleNonStreamingRequest(
   agentId?: string,
   /** Anthropic env API key — required for cross-provider cascade API key resolution (GH #38) */
   anthropicEnvKeyForCascade?: string,
+  sessionId?: string,
+  sessionSource?: 'claude-code' | 'synthetic',
+  /** CAP 3: trace ID for deterministic trace write */
+  traceId?: string,
 ): Promise<void> {
   let responseData: Record<string, unknown>;
 
@@ -6265,7 +7213,7 @@ async function handleNonStreamingRequest(
           // All fallbacks exhausted — return the primary error
           const durationMs = Date.now() - startTime;
           const nsErrMsg = extractProviderErrorMessage(responseData, result.status);
-          logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, `${routingMode}+cascade`, undefined, taskType, complexity, undefined, undefined, nsErrMsg, result.status);
+          logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, `${routingMode}+cascade`, undefined, taskType, complexity, agentFingerprint, agentId, nsErrMsg, result.status);
           if (recordTelemetry) {
             sendCloudTelemetry(taskType, targetModel, 0, 0, durationMs, false, 0, request.model ?? undefined);
             meshCapture(targetModel, targetProvider, taskType, 0, 0, 0, durationMs, false, nsErrMsg);
@@ -6278,7 +7226,7 @@ async function handleNonStreamingRequest(
         // No cascade — return error as-is
         const durationMs = Date.now() - startTime;
         const nsErrMsg = extractProviderErrorMessage(responseData, result.status);
-        logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, undefined, undefined, nsErrMsg, result.status);
+        logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, agentFingerprint, agentId, nsErrMsg, result.status);
         if (recordTelemetry) {
           sendCloudTelemetry(taskType, targetModel, 0, 0, durationMs, false, 0, request.model ?? undefined);
           meshCapture(targetModel, targetProvider, taskType, 0, 0, 0, durationMs, false, nsErrMsg);
@@ -6295,7 +7243,7 @@ async function handleNonStreamingRequest(
       cooldownManager.recordFailure(targetProvider, errorMsg);
     }
     const durationMs = Date.now() - startTime;
-    logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, undefined, undefined, errorMsg, 500);
+    logRequest(request.model ?? 'unknown', targetModel, targetProvider, durationMs, false, routingMode, undefined, taskType, complexity, agentFingerprint, agentId, errorMsg, 500);
     if (recordTelemetry) {
       sendCloudTelemetry(taskType, targetModel, 0, 0, durationMs, false, 0, request.model ?? undefined);
       meshCapture(targetModel, targetProvider, taskType, 0, 0, 0, durationMs, false, errorMsg);
@@ -6325,6 +7273,39 @@ async function handleNonStreamingRequest(
   const cost = estimateCost(targetModel, tokensIn, tokensOut, cacheCreationTokens || undefined, cacheReadTokens || undefined);
   updateLastHistoryEntry(tokensIn, tokensOut, cost, nonStreamRespModel, cacheCreationTokens || undefined, cacheReadTokens || undefined, agentFingerprint, agentId);
   if (agentFingerprint && agentFingerprint !== 'unknown') updateAgentCost(agentFingerprint, cost);
+  if (sessionId && sessionSource) upsertSession(sessionId, sessionSource, cost, tokensIn, tokensOut);
+
+  // ── Session 4: Episodic memory write (fire-and-forget) ──
+  if (sessionId) {
+    try {
+      writeEpisode(sessionId, {
+        eventType: 'model-response',
+        modelUsed: targetModel,
+        tokensIn,
+        tokensOut,
+        costUsd: cost,
+        outcome: 'success',
+        traceId: traceId ?? undefined,
+        durationMs,
+      });
+    } catch { /* never block hot path */ }
+  }
+
+  // ── CAP 3: Deterministic Traces — emit request.end + finalize (chat non-streaming) ──
+  if (traceId && sessionId && recordTelemetry) {
+    const tw = TraceWriter.getInstance();
+    if (tw.isEnabled()) {
+      const finishReason = (responseData as Record<string, unknown> | undefined)?.['choices']
+        ? ((responseData as Record<string, unknown>)['choices'] as Record<string, unknown>[])[0]?.['finish_reason'] as string | undefined
+        : undefined;
+      void tw.write(sessionId, traceId, {
+        eventType: 'request.end',
+        durationMs,
+        payload: { modelUsed: targetModel, tokensIn, tokensOut, costUsd: cost, finishReason },
+      });
+      void tw.finalizeTrace(traceId, sessionId, { costUsd: cost, modelUsed: targetModel, durationMs });
+    }
+  }
 
   // ── Post-request: budget spend + anomaly detection ──
   try {

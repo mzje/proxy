@@ -126,6 +126,7 @@ describe('RecoveryPatternStore', () => {
   });
 
   it('updates existing pattern on upsert', () => {
+    const now = new Date().toISOString();
     store.upsert({
       id: 'auth-1',
       type: 'auth-header',
@@ -135,8 +136,8 @@ describe('RecoveryPatternStore', () => {
       confidence: 1.0,
       successCount: 1,
       failureCount: 0,
-      firstSeen: '2026-01-01T00:00:00Z',
-      lastSeen: '2026-01-01T00:00:00Z',
+      firstSeen: now,
+      lastSeen: now,
     });
 
     store.upsert({
@@ -148,8 +149,8 @@ describe('RecoveryPatternStore', () => {
       confidence: 1.0,
       successCount: 1,
       failureCount: 0,
-      firstSeen: '2026-03-01T00:00:00Z',
-      lastSeen: '2026-03-01T00:00:00Z',
+      firstSeen: now,
+      lastSeen: now,
     });
 
     const all = store.getAll();
