@@ -58,8 +58,8 @@ describe('Config Resilience', () => {
     const { loadConfig } = await getConfig();
     const config = loadConfig();
     expect(config.device_id).toMatch(/^anon_/);
-    expect(config.telemetry_enabled).toBe(true);
-    expect(config.config_version).toBe(1);
+    expect(config.telemetry_enabled).toBe(false); // Off by default since v1.9.2
+    expect(config.config_version).toBeGreaterThanOrEqual(1); // Migration bumps v1→v2 on first load
     expect(fs.existsSync(configFile)).toBe(true);
   });
 
@@ -110,23 +110,24 @@ describe('Config Resilience', () => {
     const { loadConfig } = await getConfig();
     const config = loadConfig();
     expect(config.device_id).toMatch(/^anon_/);
-    expect(config.config_version).toBe(1);
+    // Fresh config starts at v1 but loadConfig() migration bumps it to v2
+    expect(config.config_version).toBeGreaterThanOrEqual(1);
   });
 
-  it('should auto-enable telemetry when credentials.json exists with valid apiKey', async () => {
+  it('should keep telemetry off when credentials.json exists (opt-in model since v1.9.2)', async () => {
     // Create credentials.json before loading config
     fs.writeFileSync(credFile, JSON.stringify({ apiKey: 'sk-test-key-123' }));
     
     const { loadConfig } = await getConfig();
     const config = loadConfig();
-    expect(config.telemetry_enabled).toBe(true);
+    expect(config.telemetry_enabled).toBe(false); // Opt-in since v1.9.2, never auto-enabled
   });
 
-  it('should auto-enable telemetry for anonymous users (opt-out model)', async () => {
+  it('should keep telemetry off for anonymous users (opt-in model since v1.9.2)', async () => {
     // No credentials.json
     const { loadConfig } = await getConfig();
     const config = loadConfig();
-    expect(config.telemetry_enabled).toBe(true);
+    expect(config.telemetry_enabled).toBe(false); // Opt-in since v1.9.2
   });
 
   it('should use atomic writes (write to .tmp then rename)', async () => {

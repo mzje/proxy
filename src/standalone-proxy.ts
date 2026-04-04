@@ -306,11 +306,11 @@ export const RELAYPLANE_ALIASES: Record<string, string> = {
  * Use buildSmartAliases() to (re)generate.
  */
 export let SMART_ALIASES: Record<string, { provider: Provider; model: string }> = {
-  // Defaults: OpenRouter (used when no env vars are available)
-  'rp:best': { provider: 'openrouter', model: 'anthropic/claude-sonnet-4-6' },
-  'rp:fast': { provider: 'openrouter', model: 'anthropic/claude-3-5-haiku' },
-  'rp:cheap': { provider: 'openrouter', model: 'google/gemini-2.5-flash-lite' },
-  'rp:balanced': { provider: 'openrouter', model: 'anthropic/claude-3-5-haiku' },
+  // Defaults: Anthropic passthrough (Max plan / Claude Code users with no API key)
+  'rp:best': { provider: 'anthropic', model: 'claude-opus-4-6' },
+  'rp:fast': { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+  'rp:cheap': { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+  'rp:balanced': { provider: 'anthropic', model: 'claude-sonnet-4-6' },
 };
 
 /**
@@ -352,14 +352,15 @@ export function buildSmartAliases(): { aliases: Record<string, { provider: Provi
       },
     };
   }
-  // Fallback: OpenRouter defaults (user will get auth error, but won't silently fail)
+  // Max plan / Claude Code passthrough — no API key, auth comes from Claude Code at request time
+  // Haiku not available on Max plan, so Sonnet/Opus only
   return {
-    via: 'openrouter (fallback — no API keys detected)',
+    via: 'anthropic (Max plan passthrough — Sonnet/Opus only)',
     aliases: {
-      'rp:best': { provider: 'openrouter', model: 'anthropic/claude-sonnet-4-6' },
-      'rp:fast': { provider: 'openrouter', model: 'anthropic/claude-3-5-haiku' },
-      'rp:cheap': { provider: 'openrouter', model: 'google/gemini-2.5-flash-lite' },
-      'rp:balanced': { provider: 'openrouter', model: 'anthropic/claude-3-5-haiku' },
+      'rp:best': { provider: 'anthropic', model: 'claude-opus-4-6' },
+      'rp:fast': { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+      'rp:cheap': { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+      'rp:balanced': { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     },
   };
 }
@@ -400,16 +401,6 @@ function sendCloudTelemetry(
     };
     // Record locally (writes to telemetry.jsonl + queues upload if telemetry_enabled)
     recordCloudTelemetry(event);
-    // Ensure cloud upload even if local telemetry_enabled is false
-    // recordCloudTelemetry skips queueForUpload when telemetry is disabled,
-    // but cloud dashboard needs these events regardless of local config
-    if (!isTelemetryEnabled()) {
-      queueForUpload({
-        ...event,
-        device_id: getDeviceId(),
-        timestamp: new Date().toISOString(),
-      });
-    }
     // Check whether we should show the signup nudge.
     // Called *after* the event is written so the count includes this request.
     // Uses setImmediate to guarantee zero added latency on the response path —
@@ -3203,7 +3194,7 @@ async function loadSessions(){
       const isActive=activeIds.has(s.id)||s.active;
       const dur=s.duration_ms>0?Math.round(s.duration_ms/1000)+'s':'—';
       const badge=isActive?'<span class="badge ok" style="font-size:.7rem">LIVE</span>':'<span style="color:#64748b;font-size:.75rem">idle</span>';
-      const srcBadge=s.session_source==='claude-code'?'<span style="color:#60a5fa;font-size:.75rem">claude-code</span>':'<span style="color:#94a3b8;font-size:.75rem">synthetic</span>';
+      const srcBadge=s.session_source==='claude-code'?'<span style="color:#60a5fa;font-size:.75rem">claude-code</span>':'<span style="color:#94a3b8;font-size:.75rem">proxy</span>';
       const sid=s.id.length>20?s.id.slice(0,20)+'…':s.id;
       const mix=s.model_mix&&Object.keys(s.model_mix).length?Object.entries(s.model_mix).map(([m,c])=>{const short=m.replace('claude-','').replace(/-\d{8}$/,'').replace('sonnet','Sonnet').replace('opus','Opus').replace('haiku','Haiku');return '<span style="font-size:.72rem;color:#94a3b8">'+short+'<span style="color:#475569">×</span>'+c+'</span>';}).join(' '):'<span style="color:#475569;font-size:.72rem">—</span>';
       return '<tr><td style="font-family:monospace;font-size:.8rem" title="'+esc(s.id)+'">'+sid+'</td><td>'+srcBadge+'</td><td>'+fmtTime(new Date(s.started_at).toISOString())+'</td><td>'+dur+'</td><td>'+s.request_count+'</td><td>'+(s.total_tokens_in||0)+'</td><td>'+(s.total_tokens_out||0)+'</td><td>$'+fmt(s.total_cost_usd,4)+'</td><td>'+mix+'</td><td>'+badge+'</td></tr>';

@@ -28,10 +28,10 @@ export interface MeshConfig {
 }
 
 export const DEFAULT_MESH_CONFIG: MeshConfig = {
-  enabled: true,
+  enabled: false,
   endpoint: 'https://osmosis-mesh-dev.fly.dev',
   sync_interval_ms: 60000,
-  contribute: true,
+  contribute: false,
 };
 
 export interface MeshHandle {

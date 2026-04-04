@@ -529,31 +529,17 @@ export function getPendingUploadCount(): number {
 export function printTelemetryDisclosure(): void {
   console.log(`
 ╭─────────────────────────────────────────────────────────────────────╮
-│                    📊 TELEMETRY DISCLOSURE                          │
+│                    ⚡ RelayPlane is running                          │
 ╰─────────────────────────────────────────────────────────────────────╯
 
-RelayPlane collects anonymous telemetry to improve model routing.
+Dashboard:        http://localhost:4100
+Quickstart:       relayplane.com/docs/quickstart
 
-What we collect:
-  • Anonymous device ID (random, not fingerprintable)
-  • Task type (inferred from token patterns, NOT your prompts)
-  • Model used, token counts, latency, success/failure
-  • Estimated cost
+To connect Claude Code:
+  export ANTHROPIC_BASE_URL=http://localhost:4100
 
-What we NEVER collect:
-  • Your prompts or model responses
-  • File paths or contents
-  • Anything that could identify you or your project
-
-How to verify:
-  • Run with --audit to see exact payloads before they're sent
-  • Run with --offline to disable all telemetry transmission
-  • Full source code: https://github.com/RelayPlane/proxy
-
-To opt out completely:
-  $ relayplane-proxy telemetry off
-
-Learn more: https://relayplane.com/privacy
+All routing and cost tracking happens locally on your machine.
+Nothing leaves your network.
 
 `);
 }

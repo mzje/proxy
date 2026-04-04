@@ -20,29 +20,32 @@ describe('RELAYPLANE_ALIASES', () => {
 describe('SMART_ALIASES', () => {
   it('should have rp:best pointing to a valid model', () => {
     expect(SMART_ALIASES['rp:best']).toBeDefined();
-    expect(SMART_ALIASES['rp:best'].provider).toBe('openrouter');
+    // Default (no API keys): Anthropic passthrough for Max plan users
+    expect(SMART_ALIASES['rp:best'].provider).toBe('anthropic');
     expect(SMART_ALIASES['rp:best'].model).toContain('claude');
   });
 
   it('should have rp:fast pointing to a fast model', () => {
     expect(SMART_ALIASES['rp:fast']).toBeDefined();
-    expect(SMART_ALIASES['rp:fast'].model).toContain('haiku');
+    // Max plan passthrough: Haiku not available, defaults to Sonnet
+    expect(SMART_ALIASES['rp:fast'].model).toContain('sonnet');
   });
 
   it('should have rp:cheap pointing to a cheap model', () => {
     expect(SMART_ALIASES['rp:cheap']).toBeDefined();
-    expect(SMART_ALIASES['rp:cheap'].model).toContain('gemini');
+    // Max plan passthrough: cheapest available is Sonnet (no Haiku, no Gemini without OpenRouter key)
+    expect(SMART_ALIASES['rp:cheap'].model).toContain('claude');
   });
 
   it('should have rp:balanced pointing to a balanced model', () => {
     expect(SMART_ALIASES['rp:balanced']).toBeDefined();
   });
 
-  it('should point to valid OpenRouter models', () => {
-    // OpenRouter format: provider/model-name
-    expect(SMART_ALIASES['rp:best'].model).toMatch(/^[a-z]+\//);
-    expect(SMART_ALIASES['rp:fast'].model).toMatch(/^[a-z]+\//);
-    expect(SMART_ALIASES['rp:balanced'].model).toMatch(/^[a-z]+\//);
+  it('should point to Anthropic models by default (Max plan passthrough)', () => {
+    // Default when no API keys: Anthropic passthrough, not OpenRouter
+    expect(SMART_ALIASES['rp:best'].provider).toBe('anthropic');
+    expect(SMART_ALIASES['rp:fast'].provider).toBe('anthropic');
+    expect(SMART_ALIASES['rp:balanced'].provider).toBe('anthropic');
   });
 });
 

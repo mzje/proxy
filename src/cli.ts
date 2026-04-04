@@ -1573,12 +1573,11 @@ async function main(): Promise<void> {
   const hasMoonshotKey = !!process.env['MOONSHOT_API_KEY'];
 
   if (!hasAnthropicKey && !hasOpenAIKey && !hasGeminiKey && !hasXAIKey && !hasOpenRouterKey && !hasDeepSeekKey && !hasGroqKey && !hasMoonshotKey) {
-    console.error('Error: No API keys found. Set at least one of:');
-    console.error('  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY,');
-    console.error('  OPENROUTER_API_KEY, DEEPSEEK_API_KEY, GROQ_API_KEY, MOONSHOT_API_KEY');
-    console.error('');
-    console.error('Tip: Keys can be set in a .env file in your current directory or home folder.');
-    process.exit(1);
+    // Max plan / Claude Code users: no API key needed — auth passes through from Claude Code
+    console.log('  ℹ️  No API key set — running in passthrough mode.');
+    console.log('     Claude Code (Max plan) users: this is correct, no key needed.');
+    console.log('     API key users: set ANTHROPIC_API_KEY to enable env-based auth.');
+    console.log('');
   }
 
   // Print startup info
@@ -1612,7 +1611,11 @@ async function main(): Promise<void> {
   
   console.log('');
   console.log('  Providers:');
-  if (hasAnthropicKey) console.log('    ✓ Anthropic');
+  if (hasAnthropicKey) {
+    console.log('    ✓ Anthropic (API key)');
+  } else {
+    console.log('    ✓ Anthropic (Max plan / Claude Code passthrough)');
+  }
   if (hasOpenAIKey) console.log('    ✓ OpenAI');
   if (hasGeminiKey) console.log('    ✓ Google Gemini');
   if (hasXAIKey) console.log('    ✓ xAI (Grok)');
@@ -1624,11 +1627,17 @@ async function main(): Promise<void> {
   try {
     await startProxy({ port, host, verbose });
     
+    console.log('  Ready. Point Claude Code at the proxy:');
     console.log('');
-    console.log('  To use, point your agent at the proxy:');
-    console.log(`    ANTHROPIC_BASE_URL=http://localhost:${port} your-agent`);
-    console.log(`    OPENAI_BASE_URL=http://localhost:${port} your-agent`);
+    console.log(`    export ANTHROPIC_BASE_URL=http://localhost:${port}`);
+    console.log('    # then run: claude (Max plan — no API key needed)');
     console.log('');
+    console.log(`  Dashboard → http://localhost:${port}`);
+    console.log('');
+    if (!hasAnthropicKey) {
+      console.log('  Tip: add the export to your ~/.zshrc or ~/.bashrc to make it permanent.');
+      console.log('');
+    }
 
     // Non-blocking update check (fires after startup, doesn't delay anything)
     if (!offline) {

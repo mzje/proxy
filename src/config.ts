@@ -135,7 +135,13 @@ export interface ProxyConfig {
   
   /** Schema version for migrations */
   config_version: number;
-  
+
+  /** True if the user explicitly ran `relayplane telemetry on/off` — migrations must not override this */
+  telemetry_explicitly_set?: boolean;
+
+  /** True if the v1→v2 telemetry-off migration was applied to this config */
+  telemetry_migration_applied?: boolean;
+
   /** Timestamp of config creation */
   created_at: string;
   
@@ -195,7 +201,7 @@ export interface TracesConfig {
   maxDiskMb: number;
 }
 
-const CONFIG_VERSION = 1;
+const CONFIG_VERSION = 2;
 
 /**
  * Resolve the base RelayPlane config directory.
@@ -248,16 +254,16 @@ function createDefaultConfig(): ProxyConfig {
   const now = new Date().toISOString();
   return {
     device_id: generateDeviceId(),
-    telemetry_enabled: true, // On by default — required for cloud dashboard. Disable with `relayplane telemetry off`
+    telemetry_enabled: false, // Off by default. Enable with `relayplane telemetry on`
     first_run_complete: false,
     config_version: CONFIG_VERSION,
     created_at: now,
     updated_at: now,
     mesh: {
-      enabled: true, // On by default as of v1.9. Disable: `relayplane mesh off`
+      enabled: false, // Off by default. Enable: `relayplane mesh on`
       endpoint: 'https://osmosis-mesh-dev.fly.dev',
       sync_interval_ms: 60000,
-      contribute: true,
+      contribute: false,
     },
   };
 }
@@ -294,12 +300,29 @@ export function loadConfig(): ProxyConfig {
         config.device_id = generateDeviceId();
       }
       if (config.telemetry_enabled === undefined) {
-        config.telemetry_enabled = true;
+        config.telemetry_enabled = false;
       }
       if (!config.config_version) {
         config.config_version = CONFIG_VERSION;
       }
-      
+
+      // v1 → v2 migration: flip telemetry off for users who never explicitly opted in.
+      // Skipped when telemetry_explicitly_set is true (user ran `relayplane telemetry on/off`).
+      if (config.config_version === 1 && config.telemetry_enabled === true && !config.telemetry_explicitly_set) {
+        config.telemetry_enabled = false;
+        config.config_version = 2;
+        config.telemetry_migration_applied = true;
+        saveConfig(config);
+        console.log('[RelayPlane] Telemetry has been turned off by default as of v1.9.2. Run `relayplane telemetry on` to re-enable.');
+        return config;
+      }
+
+      // Bump config_version for any remaining v1 config (telemetry already false or explicitly set)
+      if (config.config_version === 1) {
+        config.config_version = 2;
+        saveConfig(config);
+      }
+
       return config;
     } catch (err) {
       // Config is corrupted, try backup
@@ -335,14 +358,9 @@ export function loadConfig(): ProxyConfig {
   // Last resort: create default config
   const config = createDefaultConfig();
   
-  // Task 3: Auto-enable telemetry for authenticated users
+  // Task 3: Keep telemetry off for authenticated users
   if (hasValidCredentials()) {
-    config.telemetry_enabled = true;
-    console.log('[RelayPlane] Telemetry enabled (authenticated user)');
-    // Auto-enable mesh for authenticated users
-    if (config.mesh) {
-      config.mesh.enabled = true;
-    }
+    config.telemetry_enabled = false;
   }
   
   saveConfig(config);
@@ -409,14 +427,14 @@ export function isTelemetryEnabled(): boolean {
  * Enable telemetry
  */
 export function enableTelemetry(): void {
-  updateConfig({ telemetry_enabled: true });
+  updateConfig({ telemetry_enabled: true, telemetry_explicitly_set: true });
 }
 
 /**
  * Disable telemetry
  */
 export function disableTelemetry(): void {
-  updateConfig({ telemetry_enabled: false });
+  updateConfig({ telemetry_enabled: false, telemetry_explicitly_set: true });
 }
 
 /**
@@ -480,10 +498,10 @@ export function getCredentialsPath(): string {
 export function getMeshConfig(): MeshConfigSection {
   const config = loadConfig();
   return config.mesh ?? {
-    enabled: true,
+    enabled: false,
     endpoint: 'https://osmosis-mesh-dev.fly.dev',
     sync_interval_ms: 60000,
-    contribute: true,
+    contribute: false,
   };
 }
 
