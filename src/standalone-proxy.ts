@@ -5298,6 +5298,42 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
         targetModel = resolved.model;
       }
 
+      // Guard: Sonnet has a 200K standard context window. Requests larger than that
+      // require "extra usage" on Max plan, which most users haven't enabled.
+      // If we routed to Sonnet but the conversation exceeds 200K tokens, upgrade to Opus
+      // so the request doesn't fail. Opus 1M context is included in Max plan.
+      if (
+        targetProvider === 'anthropic' &&
+        targetModel.includes('sonnet') &&
+        messages.length > 0
+      ) {
+        const allText = extractMessageText(messages);
+        const estimatedTokens = Math.ceil(allText.length / 4);
+        if (estimatedTokens > 180000) { // 180K buffer below 200K limit
+          const opusModel = proxyConfig.routing?.complexity?.complex
+            ? parseComplexityModel(proxyConfig.routing.complexity.complex).model
+            : 'claude-opus-4-6';
+          log(`Context guard: ${estimatedTokens} estimated tokens exceeds Sonnet 200K limit → upgrading to ${opusModel}`);
+          targetModel = opusModel;
+        }
+      }
+
+      // Strip 1M context beta header when routing to Sonnet.
+      // Sonnet 1M requires "extra usage" on Max plan; without it Anthropic rejects the request.
+      // Opus 1M is included in Max plan. Stripping the beta falls back to Sonnet's 200K window.
+      let effectiveCtx = ctx;
+      if (targetModel.includes('sonnet') && ctx.betaHeaders?.includes('context-1m')) {
+        effectiveCtx = {
+          ...ctx,
+          betaHeaders: ctx.betaHeaders
+            .split(',')
+            .map(b => b.trim())
+            .filter(b => !b.startsWith('context-1m'))
+            .join(',') || undefined,
+        };
+        log(`Stripped 1M context beta from Sonnet request (requires extra usage on Max plan)`);
+      }
+
       if (
         proxyConfig.reliability?.cooldowns?.enabled &&
         !useCascade &&
@@ -5530,8 +5566,8 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           // Build pool-aware context: when the pool is managing auth, clear incoming
           // auth headers so buildAnthropicHeadersWithAuth uses the pool token instead.
           const _nativeReqCtx: RequestContext = _poolSelectedToken
-            ? { ...ctx, authHeader: undefined, apiKeyHeader: undefined }
-            : ctx;
+            ? { ...effectiveCtx, authHeader: undefined, apiKeyHeader: undefined }
+            : effectiveCtx;
 
           let providerResponse = await forwardNativeAnthropicRequest(
             { ...requestBody, model: finalModel },
@@ -6331,6 +6367,37 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
       }
     }
 
+    // Guard: Sonnet 200K context limit — upgrade to Opus for large contexts
+    if (
+      targetProvider === 'anthropic' &&
+      targetModel.includes('sonnet') &&
+      request.messages?.length > 0
+    ) {
+      const allText = extractMessageText(request.messages as Array<{ role?: string; content?: unknown }>);
+      const estimatedTokens = Math.ceil(allText.length / 4);
+      if (estimatedTokens > 180000) {
+        const opusModel = proxyConfig.routing?.complexity?.complex
+          ? parseComplexityModel(proxyConfig.routing.complexity.complex).model
+          : 'claude-opus-4-6';
+        log(`Context guard: ${estimatedTokens} estimated tokens exceeds Sonnet 200K limit → upgrading to ${opusModel}`);
+        targetModel = opusModel;
+      }
+    }
+
+    // Strip 1M context beta header when routing to Sonnet (same as native handler above)
+    let effectiveCtx = ctx;
+    if (targetModel.includes('sonnet') && ctx.betaHeaders?.includes('context-1m')) {
+      effectiveCtx = {
+        ...ctx,
+        betaHeaders: ctx.betaHeaders
+          .split(',')
+          .map(b => b.trim())
+          .filter(b => !b.startsWith('context-1m'))
+          .join(',') || undefined,
+      };
+      log(`Stripped 1M context beta from Sonnet request (requires extra usage on Max plan)`);
+    }
+
     // ── Ollama routing: intercept before cloud dispatch ──
     if (!useCascade && _activeOllamaConfig && _activeOllamaConfig.enabled !== false) {
       if (targetProvider === 'ollama' || shouldRouteToOllama(_activeOllamaConfig, complexity, taskType, request.model)) {
@@ -6447,7 +6514,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
         targetProvider,
         targetModel,
         apiKey,
-        ctx,
+        effectiveCtx,
         relay,
         promptText,
         taskType,
@@ -6488,7 +6555,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
                 resolved.provider,
                 resolved.model,
                 apiKeyResult.apiKey,
-                ctx
+                effectiveCtx
               );
               if (!result.ok) {
                 if (cooldownsEnabled) {
@@ -6631,7 +6698,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           targetProvider,
           targetModel,
           apiKey,
-          ctx,
+          effectiveCtx,
           relay,
           promptText,
           taskType,
