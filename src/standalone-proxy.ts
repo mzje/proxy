@@ -112,6 +112,28 @@ async function getLatestProxyVersion(): Promise<string | null> {
     return latestProxyVersionCache.value;
   }
 
+  // Primary: call our API (also serves as install ping)
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    const url = `https://api.relayplane.com/v1/check?v=${encodeURIComponent(PROXY_VERSION)}&os=${encodeURIComponent(process.platform)}&arch=${encodeURIComponent(process.arch)}`;
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
+    clearTimeout(timeout);
+
+    if (res.ok) {
+      const data = await res.json() as { latest?: string };
+      const latest = data.latest ?? null;
+      latestProxyVersionCache = { value: latest, checkedAt: now };
+      return latest;
+    }
+  } catch {
+    // API unavailable — fall through to npm fallback
+  }
+
+  // Fallback: hit npm registry directly
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2500);

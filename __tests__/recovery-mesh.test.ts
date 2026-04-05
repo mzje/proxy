@@ -34,7 +34,7 @@ function makePattern(overrides: Partial<RecoveryPattern> = {}): RecoveryPattern 
     successCount: 19,
     failureCount: 1,
     firstSeen: '2026-03-01T00:00:00Z',
-    lastSeen: '2026-03-06T00:00:00Z',
+    lastSeen: new Date().toISOString(),
     ...overrides,
   };
 }
@@ -57,7 +57,7 @@ function makeAtom(overrides: Partial<RecoveryAtom> = {}): RecoveryAtom {
     confirmCount: 19,
     denyCount: 1,
     firstSeen: '2026-03-01T00:00:00Z',
-    lastSeen: '2026-03-06T00:00:00Z',
+    lastSeen: new Date().toISOString(),
     originInstance: 'instance-a',
     version: 1,
     ...overrides,
@@ -357,7 +357,10 @@ describe('MeshRecoveryAtomStore', () => {
   it('prunes expired atoms', () => {
     // Atom with lastSeen 60 days ago
     const oldDate = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+    const oldMs = Date.now() - 60 * 24 * 60 * 60 * 1000;
     store.upsert(makeAtom({ id: 'expired', lastSeen: oldDate, lastConfirmed: oldDate }));
+    // Backdate the local upsert timestamp so pruneExpired treats it as genuinely old
+    store._backdateUpsert('expired', oldMs);
     store.upsert(makeAtom({ id: 'fresh', lastSeen: new Date().toISOString() }));
 
     const pruned = store.pruneExpired();
@@ -1018,11 +1021,14 @@ describe('Multi-Instance Pattern Propagation', () => {
   it('expired patterns are not propagated', async () => {
     // Add an old pattern to mesh that has expired
     const oldDate = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+    const oldMs = Date.now() - 60 * 24 * 60 * 60 * 1000;
     server.store.upsert(makeAtom({
       id: 'expired-pattern',
       lastSeen: oldDate,
       lastConfirmed: oldDate,
     }));
+    // Backdate the local upsert timestamp so pruneExpired treats it as genuinely old
+    server.store._backdateUpsert('expired-pattern', oldMs);
 
     // Trigger pruning
     server.store.pruneExpired();

@@ -227,6 +227,8 @@ function newerTimestamp(a?: string, b?: string): string | undefined {
  */
 export class MeshRecoveryAtomStore {
   private atoms: Map<string, RecoveryAtom> = new Map();
+  /** Wall-clock time (ms) when each atom was last upserted into this store instance */
+  private upsertedAt: Map<string, number> = new Map();
   private readonly expiryDays: number;
 
   constructor(expiryDays = 30) {
@@ -248,13 +250,27 @@ export class MeshRecoveryAtomStore {
   /** Upsert with merge semantics */
   upsert(atom: RecoveryAtom): RecoveryAtom {
     const existing = this.atoms.get(atom.id);
+    const now = Date.now();
     if (existing) {
       const merged = mergeRecoveryAtoms(existing, atom);
       this.atoms.set(atom.id, merged);
+      this.upsertedAt.set(atom.id, now);
       return merged;
     }
     this.atoms.set(atom.id, atom);
+    this.upsertedAt.set(atom.id, now);
     return atom;
+  }
+
+  /**
+   * Backdate the local upsert timestamp for an atom.
+   * Intended for testing pruneExpired() with controlled clock values.
+   * @internal
+   */
+  _backdateUpsert(id: string, timestampMs: number): void {
+    if (this.upsertedAt.has(id)) {
+      this.upsertedAt.set(id, timestampMs);
+    }
   }
 
   /** Remove an atom */
@@ -310,8 +326,13 @@ export class MeshRecoveryAtomStore {
     let pruned = 0;
     for (const [key, atom] of this.atoms) {
       const lastActivity = atom.lastConfirmed ?? atom.lastSeen;
-      if (new Date(lastActivity).getTime() < cutoff) {
+      // Only prune if both the atom's own lastActivity timestamp AND its local
+      // upsert time are past the cutoff. This prevents freshly-upserted atoms
+      // with historical lastSeen values from being pruned on the next getAll().
+      const localUpsertedAt = this.upsertedAt.get(key) ?? 0;
+      if (new Date(lastActivity).getTime() < cutoff && localUpsertedAt < cutoff) {
         this.atoms.delete(key);
+        this.upsertedAt.delete(key);
         pruned++;
       }
     }

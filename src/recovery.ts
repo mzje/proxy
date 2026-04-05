@@ -143,6 +143,8 @@ export interface RecoveryConfig {
  */
 export class RecoveryPatternStore {
   private patterns: Map<string, RecoveryPattern> = new Map();
+  /** Wall-clock time (ms) when each pattern was last upserted into this store instance */
+  private upsertedAt: Map<string, number> = new Map();
   private readonly maxPatterns: number;
   private readonly expiryDays: number;
 
@@ -207,6 +209,7 @@ export class RecoveryPatternStore {
       }
       this.patterns.set(pattern.id, pattern);
     }
+    this.upsertedAt.set(pattern.id, Date.now());
   }
 
   /** Record a successful application of a pattern */
@@ -243,9 +246,25 @@ export class RecoveryPatternStore {
   private pruneExpired(): void {
     const cutoff = Date.now() - this.expiryDays * 24 * 60 * 60 * 1000;
     for (const [key, p] of this.patterns) {
-      if (new Date(p.lastSeen).getTime() < cutoff) {
+      // Only prune if both the pattern's lastSeen AND its local upsert time
+      // are past the cutoff. Prevents freshly-upserted patterns with historical
+      // lastSeen dates from being immediately pruned.
+      const localUpsertedAt = this.upsertedAt.get(key) ?? 0;
+      if (new Date(p.lastSeen).getTime() < cutoff && localUpsertedAt < cutoff) {
         this.patterns.delete(key);
+        this.upsertedAt.delete(key);
       }
+    }
+  }
+
+  /**
+   * Backdate the local upsert timestamp for a pattern.
+   * Intended for testing pruneExpired() with controlled clock values.
+   * @internal
+   */
+  _backdateUpsert(id: string, timestampMs: number): void {
+    if (this.upsertedAt.has(id)) {
+      this.upsertedAt.set(id, timestampMs);
     }
   }
 }

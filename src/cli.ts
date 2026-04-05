@@ -82,10 +82,36 @@ try {
 }
 
 /**
- * Check npm registry for newer version (non-blocking, best-effort).
+ * Check for newer version (non-blocking, best-effort).
+ * Primary: api.relayplane.com/v1/check (also serves as anonymous install ping).
+ * Fallback: npm registry direct (if our API is down).
  * Returns update message string or null.
  */
 async function checkForUpdate(): Promise<string | null> {
+  if (process.env.RELAYPLANE_NO_UPDATE_CHECK === '1') return null;
+
+  // Primary: call our API (also logs the install ping server-side)
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const url = `https://api.relayplane.com/v1/check?v=${encodeURIComponent(VERSION)}&os=${encodeURIComponent(process.platform)}&arch=${encodeURIComponent(process.arch)}`;
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' },
+    });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const data = await res.json() as { latest?: string; update?: boolean };
+      if (data.update === true && data.latest) {
+        return `\n  ⬆️  Update available: v${VERSION} → v${data.latest}\n     Run: npm update -g @relayplane/proxy\n`;
+      }
+      return null;
+    }
+  } catch {
+    // API unavailable — fall through to npm fallback
+  }
+
+  // Fallback: hit npm registry directly
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
@@ -98,7 +124,6 @@ async function checkForUpdate(): Promise<string | null> {
     const data = await res.json() as { version?: string };
     const latest = data.version;
     if (!latest || latest === VERSION) return null;
-    // Simple semver compare: split and compare numerically
     const cur = VERSION.split('.').map(Number);
     const lat = latest.split('.').map(Number);
     for (let i = 0; i < 3; i++) {
