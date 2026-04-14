@@ -46,6 +46,9 @@ import {
   isTelemetryEnabled,
   enableTelemetry,
   disableTelemetry,
+  isLifecycleEnabled,
+  enableLifecycle,
+  disableLifecycle,
   getConfigPath,
   setApiKey,
   getMeshConfig,
@@ -646,6 +649,41 @@ function handleTelemetryCommand(args: string[]): void {
       console.log('   To audit:   relayplane-proxy --audit');
       console.log('');
       break;
+  }
+}
+
+function handleLifecycleCommand(args: string[]): void {
+  const subcommand = args[0];
+
+  switch (subcommand) {
+    case 'on':
+      enableLifecycle();
+      console.log('✅ Lifecycle telemetry enabled');
+      console.log('   Anonymous install and daily-session pings will be sent.');
+      console.log('   No request content, model names, or token counts.');
+      break;
+
+    case 'off':
+      disableLifecycle();
+      console.log('✅ Lifecycle telemetry disabled');
+      console.log('   No pings will be sent. The proxy continues to work normally.');
+      break;
+
+    case 'status':
+    default: {
+      const enabled = isLifecycleEnabled();
+      console.log('');
+      console.log('📡 Lifecycle Telemetry Status');
+      console.log('─────────────────────────────');
+      console.log(`   Enabled: ${enabled ? '✅ Yes (default)' : '❌ No'}`);
+      console.log('   Sends: anonymous install + daily session + dashboard-link pings.');
+      console.log('   Never sends: request content, model names, tokens, costs.');
+      console.log('');
+      console.log('   To enable:  relayplane lifecycle on');
+      console.log('   To disable: relayplane lifecycle off');
+      console.log('');
+      break;
+    }
   }
 }
 
@@ -1461,7 +1499,7 @@ async function main(): Promise<void> {
   }
 
   const knownCommands = new Set([
-    'init', 'start', 'telemetry', 'stats', 'config', 'login', 'logout', 'upgrade',
+    'init', 'start', 'telemetry', 'lifecycle', 'stats', 'config', 'login', 'logout', 'upgrade',
     'status', 'autostart', 'service', 'mesh', 'cache', 'budget', 'alerts', 'enable', 'disable',
     'ensure-running', 'agents', 'policy', 'setup',
   ]);
@@ -1474,6 +1512,11 @@ async function main(): Promise<void> {
 
   if (command === 'telemetry') {
     handleTelemetryCommand(args.slice(1));
+    process.exit(0);
+  }
+
+  if (command === 'lifecycle') {
+    handleLifecycleCommand(args.slice(1));
     process.exit(0);
   }
   

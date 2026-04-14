@@ -539,7 +539,10 @@ To connect Claude Code:
   export ANTHROPIC_BASE_URL=http://localhost:4100
 
 All routing and cost tracking happens locally on your machine.
-Nothing leaves your network.
+Request content, models, tokens, and costs never leave your network.
+
+Anonymous install + daily-session pings are sent so we can see whether
+RelayPlane is growing. No request data. Opt out: relayplane lifecycle off
 
 `);
 }

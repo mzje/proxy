@@ -14,7 +14,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { getDeviceId, isTelemetryEnabled, getConfigDir, loadConfig, saveConfig } from './config.js';
+import { getDeviceId, isLifecycleEnabled, getConfigDir } from './config.js';
 
 const MESH_API_URL = process.env.RELAYPLANE_API_URL || 'https://api.relayplane.com';
 const LIFECYCLE_FILE = path.join(getConfigDir(), 'lifecycle.json');
@@ -93,7 +93,7 @@ async function sendLifecycleEvent(eventType: string): Promise<void> {
  * Subsequent calls are no-ops.
  */
 export function maybeFireActivated(): void {
-  if (!isTelemetryEnabled()) return;
+  if (!isLifecycleEnabled()) return;
 
   try {
     const state = loadLifecycleState();
@@ -113,7 +113,7 @@ export function maybeFireActivated(): void {
  * Call on proxy startup.
  */
 export function maybeSendSessionHeartbeat(): void {
-  if (!isTelemetryEnabled()) return;
+  if (!isLifecycleEnabled()) return;
 
   try {
     const state = loadLifecycleState();
@@ -134,6 +134,6 @@ export function maybeSendSessionHeartbeat(): void {
  * Idempotent — safe to call multiple times but only sends once per day to avoid spam.
  */
 export function fireDashboardLinked(): void {
-  if (!isTelemetryEnabled()) return;
+  if (!isLifecycleEnabled()) return;
   sendLifecycleEvent('proxy.dashboard_linked').catch(() => {});
 }

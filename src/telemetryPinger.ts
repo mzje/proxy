@@ -40,7 +40,11 @@ function isHourElapsed(lastPing?: string): boolean {
 export async function sendPing(event: 'startup' | 'dashboard') {
   const config = loadConfig();
 
-  if (!config.telemetry_enabled || config.telemetry_exclude) {
+  // Lifecycle pings are anonymous install/dashboard signals — they piggy-back
+  // on the lifecycle_enabled flag (default on), NOT the per-request
+  // telemetry_enabled flag. This matches the 2026-04-04 privacy spec and
+  // lets users opt out of request telemetry without blinding us to installs.
+  if (config.lifecycle_enabled === false || config.telemetry_exclude) {
     return;
   }
 

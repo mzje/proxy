@@ -189,8 +189,9 @@ describe('Config Resilience', () => {
     expect(hasValidCredentials()).toBe(false);
   });
 
-  it('v2→v3 migration: disables mesh for existing configs that had it enabled', async () => {
-    // Simulate a v2 config with mesh enabled (pre-v1.9.5 install)
+  it('v2→v3→v4 migration: disables mesh and enables lifecycle for old configs', async () => {
+    // Simulate a v2 config with mesh enabled (pre-v1.9.5 install).
+    // Loading it should cascade through v2→v3 (mesh off) and v3→v4 (lifecycle on).
     const v2Config = {
       device_id: 'anon_test123',
       config_version: 2,
@@ -207,9 +208,52 @@ describe('Config Resilience', () => {
     const { loadConfig } = await getConfig();
     const config = loadConfig();
 
-    expect(config.config_version).toBe(3);
+    expect(config.config_version).toBe(4);
     expect(config.mesh?.enabled).toBe(false);
-    // Other mesh fields preserved
     expect(config.mesh?.endpoint).toBe('https://osmosis-mesh-dev.fly.dev');
+    // v3→v4 migration: lifecycle defaults to on
+    expect(config.lifecycle_enabled).toBe(true);
+  });
+
+  it('v3→v4 migration: enables lifecycle when missing, preserves explicit false', async () => {
+    // v3 config with no lifecycle field — should become true after load
+    const v3Config = {
+      device_id: 'anon_v3a',
+      config_version: 3,
+      telemetry_enabled: false,
+      mesh: { enabled: false, endpoint: 'x', contribute: false },
+    };
+    fs.writeFileSync(configFile, JSON.stringify(v3Config));
+    vi.resetModules();
+    const { loadConfig: loadA } = await getConfig();
+    expect(loadA().lifecycle_enabled).toBe(true);
+    expect(loadA().config_version).toBe(4);
+
+    // v3 config with lifecycle_enabled: false — must NOT be flipped back on
+    const v3Opted = {
+      device_id: 'anon_v3b',
+      config_version: 3,
+      telemetry_enabled: false,
+      lifecycle_enabled: false,
+      lifecycle_explicitly_set: true,
+      mesh: { enabled: false, endpoint: 'x', contribute: false },
+    };
+    fs.writeFileSync(configFile, JSON.stringify(v3Opted));
+    vi.resetModules();
+    const { loadConfig: loadB } = await getConfig();
+    const cfg = loadB();
+    expect(cfg.lifecycle_enabled).toBe(false);
+    expect(cfg.config_version).toBe(4);
+  });
+
+  it('new config defaults: telemetry off, lifecycle on', async () => {
+    // No config file at all — createDefaultConfig should kick in
+    if (fs.existsSync(configFile)) fs.unlinkSync(configFile);
+    vi.resetModules();
+    const { loadConfig } = await getConfig();
+    const config = loadConfig();
+    expect(config.telemetry_enabled).toBe(false);
+    expect(config.lifecycle_enabled).toBe(true);
+    expect(config.config_version).toBe(4);
   });
 });

@@ -124,18 +124,29 @@ export interface ProxyConfig {
   /** Anonymous device ID (generated on first run) */
   device_id: string;
   
-  /** Telemetry enabled state */
+  /** Full per-request telemetry (model, tokens, cost). Off by default. */
   telemetry_enabled: boolean;
+
+  /**
+   * Lifecycle telemetry — anonymous install/session/dashboard_linked pings.
+   * No request content, no model names, no tokens. On by default per the
+   * 2026-04-04 privacy spec. Opt out with `relayplane lifecycle off`.
+   */
+  lifecycle_enabled?: boolean;
+
+  /** True if the user explicitly ran `relayplane lifecycle on/off` */
+  lifecycle_explicitly_set?: boolean;
 
   /** Exclude this device from telemetry (for devbox) */
   telemetry_exclude?: boolean;
-  
+
   /** ISO timestamp of the last daily startup ping */
   last_ping_date?: string;
 
   /** ISO timestamp of the last hourly dashboard ping */
   last_dashboard_ping?: string;
-  
+
+
   /** Whether first run disclosure has been shown */
   first_run_complete: boolean;
   
@@ -210,7 +221,7 @@ export interface TracesConfig {
   maxDiskMb: number;
 }
 
-const CONFIG_VERSION = 3;
+const CONFIG_VERSION = 4;
 
 /**
  * Resolve the base RelayPlane config directory.
@@ -264,6 +275,7 @@ function createDefaultConfig(): ProxyConfig {
   return {
     device_id: generateDeviceId(),
     telemetry_enabled: false, // Off by default. Enable with `relayplane telemetry on`
+    lifecycle_enabled: true, // Anonymous install/session pings. Opt-out via `relayplane lifecycle off`
     first_run_complete: false,
     config_version: CONFIG_VERSION,
     created_at: now,
@@ -345,6 +357,17 @@ export function loadConfig(): ProxyConfig {
       // Bump config_version for any remaining v2 config (mesh already off or not set)
       if (config.config_version === 2) {
         config.config_version = 3;
+        saveConfig(config);
+      }
+
+      // v3 → v4 migration: introduce lifecycle_enabled (default on). Only set
+      // the field if it's missing — respects explicit user choice if they
+      // already ran `relayplane lifecycle off`.
+      if (config.config_version === 3) {
+        if (config.lifecycle_enabled === undefined) {
+          config.lifecycle_enabled = true;
+        }
+        config.config_version = 4;
         saveConfig(config);
       }
 
@@ -460,6 +483,23 @@ export function enableTelemetry(): void {
  */
 export function disableTelemetry(): void {
   updateConfig({ telemetry_enabled: false, telemetry_explicitly_set: true });
+}
+
+/**
+ * Check if lifecycle telemetry is enabled. Defaults to true when the field is
+ * missing (new install, or pre-v4 config that hasn't been migrated yet).
+ */
+export function isLifecycleEnabled(): boolean {
+  const config = loadConfig();
+  return config.lifecycle_enabled !== false;
+}
+
+export function enableLifecycle(): void {
+  updateConfig({ lifecycle_enabled: true, lifecycle_explicitly_set: true });
+}
+
+export function disableLifecycle(): void {
+  updateConfig({ lifecycle_enabled: false, lifecycle_explicitly_set: true });
 }
 
 /**
