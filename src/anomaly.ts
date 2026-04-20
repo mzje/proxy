@@ -27,7 +27,12 @@ export interface AnomalyConfig {
   windowMs: number;
 }
 
-export type AnomalyType = 'velocity_spike' | 'cost_acceleration' | 'repetition' | 'token_explosion';
+export type AnomalyType =
+  | 'velocity_spike'
+  | 'cost_acceleration'
+  | 'repetition'
+  | 'token_explosion'
+  | 'stuck_agent';
 
 export interface AnomalyResult {
   detected: boolean;

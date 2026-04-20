@@ -255,6 +255,27 @@ export function markStaleSessionsComplete(): void {
   // No-op: staleness determined dynamically in getActiveSessions()
 }
 
+/**
+ * Remove a session from the tracker store.
+ *
+ * Used by the Phase 0 kill switch: when `relayplane status` detects a
+ * `stuck_agent` or `token_explosion` anomaly, the CLI prompts the user to
+ * kill the offending session. The local proxy's DELETE /v1/sessions/:id
+ * handler invokes this to drop the session from both SQLite and the
+ * in-memory fallback store. Silent on unknown IDs.
+ */
+export function killSession(sessionId: string): void {
+  try {
+    const db = getDb();
+    if (db) {
+      db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+    }
+  } catch {
+    /* ignore */
+  }
+  _memStore.delete(sessionId);
+}
+
 /** Exposed for testing — reset singleton state. */
 export function _resetStore(): void {
   if (_db) {
