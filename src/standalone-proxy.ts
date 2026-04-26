@@ -1498,6 +1498,21 @@ function shouldUseMaxToken(model: string, authConfig?: HybridAuthConfig): boolea
 }
 
 /**
+ * Models that do NOT support OAuth (sk-ant-oat*) tokens.
+ * API key (sk-ant-api03-*) required for these.
+ */
+const OAUTH_UNSUPPORTED_MODELS = ['haiku'];
+
+function isOAuthUnsupportedModel(model: string): boolean {
+  const lower = model.toLowerCase();
+  return OAUTH_UNSUPPORTED_MODELS.some(m => lower.includes(m));
+}
+
+function isOAuthToken(token: string): boolean {
+  return token.startsWith('sk-ant-oat');
+}
+
+/**
  * Get the appropriate API key for a model (hybrid auth support)
  */
 function getAuthForModel(
@@ -1532,25 +1547,45 @@ function setAnthropicAuth(headers: Record<string, string>, token: string): void 
 }
 
 /**
- * Build Anthropic headers with hybrid auth support
+ * Build Anthropic headers with hybrid auth support.
+ * When targetModel is provided and doesn't support OAuth, falls back to
+ * envApiKey for OAuth tokens rather than forwarding them (Haiku rejects OAuth).
  */
 function buildAnthropicHeadersWithAuth(
   ctx: RequestContext,
   apiKey?: string,
   isMaxToken?: boolean,
-  isRerouted?: boolean
+  isRerouted?: boolean,
+  targetModel?: string
 ): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'anthropic-version': ctx.versionHeader || '2023-06-01',
   };
 
-  // Auth priority: incoming auth (passthrough) > configured API key > env key
-  if (ctx.authHeader) {
-    const token = ctx.authHeader.replace(/^Bearer\s+/i, '');
-    setAnthropicAuth(headers, token);
-  } else if (ctx.apiKeyHeader) {
-    setAnthropicAuth(headers, ctx.apiKeyHeader);
+  // Resolve the incoming token from whichever header was used
+  const incomingToken = ctx.authHeader
+    ? ctx.authHeader.replace(/^Bearer\s+/i, '')
+    : ctx.apiKeyHeader ?? undefined;
+
+  // If the incoming token is OAuth and the target model doesn't support OAuth,
+  // fall back to the env API key. If no env key available, forward anyway and
+  // let Anthropic return the informative error rather than failing silently.
+  const needsApiKeyFallback =
+    incomingToken &&
+    isOAuthToken(incomingToken) &&
+    targetModel &&
+    isOAuthUnsupportedModel(targetModel);
+
+  if (needsApiKeyFallback) {
+    if (apiKey) {
+      setAnthropicAuth(headers, apiKey);
+    } else {
+      // No env key — forward OAuth and let Anthropic surface a clear error
+      setAnthropicAuth(headers, incomingToken!);
+    }
+  } else if (incomingToken) {
+    setAnthropicAuth(headers, incomingToken);
   } else if (apiKey) {
     setAnthropicAuth(headers, apiKey);
   }
@@ -1704,9 +1739,10 @@ async function forwardNativeAnthropicRequest(
   ctx: RequestContext,
   envApiKey?: string,
   isMaxToken?: boolean,
-  isRerouted?: boolean
+  isRerouted?: boolean,
+  targetModel?: string
 ): Promise<Response> {
-  const headers = buildAnthropicHeadersWithAuth(ctx, envApiKey, isMaxToken, isRerouted);
+  const headers = buildAnthropicHeadersWithAuth(ctx, envApiKey, isMaxToken, isRerouted, targetModel);
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -5725,7 +5761,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
                 log(`Stripped OAT-unsupported beta flags from request: ${cascadeLocalStrippedBeta.join(', ')}`);
               }
               const isCascadeRerouted = resolved.model !== originalModel;
-              const providerResponse = await forwardNativeAnthropicRequest(attemptBody, ctx, modelAuth.apiKey, modelAuth.isMax, isCascadeRerouted);
+              const providerResponse = await forwardNativeAnthropicRequest(attemptBody, ctx, modelAuth.apiKey, modelAuth.isMax, isCascadeRerouted, resolved.model);
               const responseData = (await providerResponse.json()) as Record<string, unknown>;
               if (!providerResponse.ok) {
                 if (proxyConfig.reliability?.cooldowns?.enabled) {
@@ -5802,7 +5838,8 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
             _nativeReqCtx,
             modelAuth.apiKey,
             modelAuth.isMax,
-            isRerouted
+            isRerouted,
+            finalModel
           );
 
           // Token pool: on 429, record and retry with next available token
@@ -5823,7 +5860,8 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
                 _retryCtx,
                 _nextPoolToken.apiKey,
                 _nextPoolToken.isOat,
-                isRerouted
+                isRerouted,
+                finalModel
               );
             }
           }
